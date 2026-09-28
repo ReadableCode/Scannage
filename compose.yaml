@@ -1,0 +1,17 @@
+# Standalone: one container and a SQLite file. Nothing else is needed.
+#   docker compose up -d --build
+# Phone browsers only open the camera on https, so put a reverse proxy with a
+# certificate in front of it for anything other than localhost.
+services:
+  scannage:
+    build: .
+    environment:
+      SCANNAGE_STORE: sqlite
+    volumes:
+      - scannage_data:/app/data
+    ports:
+      - "8791:8791"
+    restart: unless-stopped
+
+volumes:
+  scannage_data:

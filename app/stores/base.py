@@ -1,0 +1,78 @@
+"""The interface both stores implement, and the helpers they share.
+
+Ids and timestamps are minted here, in the app, so a box or item looks the
+same whichever store wrote it.
+"""
+
+from __future__ import annotations
+
+import threading
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Protocol
+
+BOX_FIELDS = ("name", "location", "notes")
+ITEM_FIELDS = ("name", "qty")
+
+
+class StoreError(Exception):
+    def __init__(self, status_code: int, detail: str):
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
+class Store(Protocol):
+    name: str  # "sqlite" or "postgrest"
+
+    def bootstrap(self) -> None: ...
+    def health(self) -> tuple[bool, str]: ...
+    def list_boxes(self) -> list[dict]: ...
+    def get_box(self, tag_id: int) -> dict | None: ...
+    def upsert_box(self, tag_id: int, fields: dict, actor: str) -> dict: ...
+    def delete_box(self, tag_id: int) -> bool: ...
+    def add_item(self, tag_id: int, name: str, qty: int, actor: str) -> dict: ...
+    def update_item(self, item_id: str, fields: dict, actor: str) -> dict | None: ...
+    def delete_item(self, item_id: str) -> bool: ...
+    def get_meta(self, key: str) -> str | None: ...
+    def set_meta(self, key: str, value: str) -> None: ...
+
+
+_clock_lock = threading.Lock()
+_last_stamp = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def utc_now() -> str:
+    """UTC ISO 8601 with fixed microsecond width, strictly increasing in this process.
+
+    Items are ordered by created_at, so two written back to back must not tie.
+    """
+    global _last_stamp
+    with _clock_lock:
+        stamp = datetime.now(timezone.utc)
+        if stamp <= _last_stamp:
+            stamp = _last_stamp + timedelta(microseconds=1)
+        _last_stamp = stamp
+    return stamp.isoformat(timespec="microseconds")
+
+
+def normalize_timestamp(value: str) -> str:
+    """Whatever offset and precision a database hands back, return the app's own format."""
+    return datetime.fromisoformat(value).astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+def new_id() -> str:
+    return str(uuid.uuid4())
+
+
+def clean_uuid(value: str) -> str | None:
+    """Canonical form of an id, or None when it cannot be one (so the caller answers 404)."""
+    try:
+        return str(uuid.UUID(str(value)))
+    except ValueError:
+        return None
+
+
+def pick(fields: dict, allowed: tuple[str, ...]) -> dict:
+    """Only the known columns that were actually supplied."""
+    return {key: fields[key] for key in allowed if fields.get(key) is not None}

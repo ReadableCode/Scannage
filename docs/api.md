@@ -22,8 +22,8 @@ Box:
   "name": "Camping",
   "location": "Shelf A, top",
   "notes": "",
-  "created_at": "2026-09-27T21:00:00+00:00",
-  "updated_at": "2026-09-27T21:00:00+00:00",
+  "created_at": "2026-09-27T21:00:00.000000+00:00",
+  "updated_at": "2026-09-27T21:00:00.000000+00:00",
   "updated_by": "",
   "items": []
 }
@@ -37,14 +37,16 @@ Item:
   "box_id": "0b8f6c2e-5a1d-4a57-9d55-6f1f0b3c9a10",
   "name": "Sleeping bag",
   "qty": 2,
-  "created_at": "2026-09-27T21:00:00+00:00",
-  "updated_at": "2026-09-27T21:00:00+00:00"
+  "created_at": "2026-09-27T21:00:00.000000+00:00",
+  "updated_at": "2026-09-27T21:00:00.000000+00:00"
 }
 ```
 
 Timestamps are UTC ISO 8601 strings written by the app, not the database.
-Boxes are ordered by `tag_id`. Items inside a box are ordered by `created_at`,
-then `id`.
+They always carry six decimal places, so they sort as text. Adding or
+changing an item also updates `updated_at` and `updated_by` on its box;
+deleting an item does not. Boxes are ordered by `tag_id`. Items inside a box
+are ordered by `created_at`, then `id`.
 
 Limits: `name` and `location` up to 120 characters, `notes` up to 2000,
 item `name` 1 to 120, `qty` 1 to 9999. Strings are trimmed.
@@ -64,7 +66,12 @@ item `name` 1 to 120, `qty` 1 to 9999. Strings are trimmed.
 | `DELETE /api/items/{item_id}` | | 204, or 404 |
 | `GET /api/qr/{tag_id}.svg` | | QR code holding `{base_url}/b/{tag_id}` |
 
-Errors are `{"detail": "..."}`. A store failure is 502.
+Errors are `{"detail": "..."}`, always with a string, validation errors
+included. A store failure is 502. An `item_id` that is not a UUID is a 404.
+
+The QR code is an SVG at error level M with a 4 module quiet zone. It has a
+`viewBox` and a default size of 8 pixels per module, so it scales in a page
+and draws on a canvas. It is sent with `Cache-Control: no-store`.
 
 Pages: `/` is the app, `/b/{tag_id}` is the app opened on that box, `/labels`
 is the printable label sheet. Static files are under `/static/`.
@@ -96,7 +103,12 @@ class Store(Protocol):
     def add_item(self, tag_id: int, name: str, qty: int, actor: str) -> dict: ...
     def update_item(self, item_id: str, fields: dict, actor: str) -> dict | None: ...
     def delete_item(self, item_id: str) -> bool: ...
+    def get_meta(self, key: str) -> str | None: ...
+    def set_meta(self, key: str, value: str) -> None: ...
 ```
+
+`get_meta` and `set_meta` read and write `app_meta`, a small key/value table
+for one-time flags such as `samples_seeded`. It is not exposed by the API.
 
 The store layer accepts any integer `tag_id`. Only the API enforces the 0 to
 249 range, which leaves negative numbers free for tests against a live store.

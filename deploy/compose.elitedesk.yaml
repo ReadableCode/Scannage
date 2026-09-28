@@ -1,0 +1,27 @@
+# Included by the host's main compose file with project_directory set to this
+# repo's root, so paths resolve from here. Uses the shared Postgres and
+# PostgREST services by compose service name.
+services:
+  scannage:
+    image: scannage_image
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: scannage
+    environment:
+      TZ: America/Chicago
+      SCANNAGE_STORE: postgrest
+      SCANNAGE_SEED_SAMPLES: "1"
+      APP_SCHEMA: scannage
+      POSTGREST_URL: http://postgrest:3000
+      POSTGRES_URL: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: apps
+    env_file:
+      - ../personal_credentials/personal.env
+    depends_on:
+      - postgres
+      - postgrest
+    ports:
+      - "8791:8791"
+    restart: unless-stopped
