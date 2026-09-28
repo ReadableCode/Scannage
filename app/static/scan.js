@@ -209,6 +209,9 @@
     });
     if (items.length > CARD_ITEMS) lines.push({ t: '+ ' + (items.length - CARD_ITEMS) + ' more', dim: true });
     if (!items.length) lines.push({ t: 'nothing listed yet', dim: true });
+    // photos are never drawn over the camera, the card only says they exist
+    var shots = data.photoCount(box);
+    if (shots) lines.push({ t: shots + (shots === 1 ? ' photo' : ' photos'), dim: true });
     return lines;
   }
 

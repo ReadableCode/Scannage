@@ -1,20 +1,23 @@
-"""One-time sample boxes, so a fresh install has something to scan.
+"""Sample boxes, so a new database has something to scan.
 
-Seeds through the normal store methods, once. The app_meta flag is what
-makes it once: after it is set, deleting every box does not bring them back.
+They belong to a brand new database: each store's bootstrap seeds them once,
+and the app_meta flag is what makes it once. After it is set, deleting every
+box does not bring them back. Only scripts/init_db.py --samples adds them
+again, and only on purpose.
 """
 
 from __future__ import annotations
 
 import logging
 
-from . import config
+from . import history
 from .stores.base import Store, utc_now
 
 log = logging.getLogger("scannage.samples")
 
 META_KEY = "samples_seeded"
-ACTOR = ""
+# Who history says added them, so they never read as something a person did.
+ACTOR = "samples"
 
 # (tag_id, name, location, [(item name, qty), ...])
 SAMPLES: tuple[tuple[int, str, str, tuple[tuple[str, int], ...]], ...] = (
@@ -70,6 +73,20 @@ SAMPLES: tuple[tuple[int, str, str, tuple[tuple[str, int], ...]], ...] = (
 )
 
 
+def add(store: Store) -> list[int]:
+    """Adds each sample whose tag is unclaimed and never touches a box that exists. Returns the tags it used."""
+    added = []
+    for tag_id, name, location, items in SAMPLES:
+        if store.get_box(tag_id) is not None:
+            continue
+        history.put_box(store, tag_id, {"name": name, "location": location}, ACTOR)
+        for item_name, qty in items:
+            history.add_item(store, tag_id, item_name, qty, ACTOR)
+        added.append(tag_id)
+    store.set_meta(META_KEY, utc_now())
+    return added
+
+
 def seed(store: Store) -> bool:
     """Returns True when the sample boxes were inserted."""
     if store.get_meta(META_KEY) is not None:
@@ -78,18 +95,11 @@ def seed(store: Store) -> bool:
         # an inventory that is already in use is never topped up with samples
         store.set_meta(META_KEY, utc_now())
         return False
-    for tag_id, name, location, items in SAMPLES:
-        store.upsert_box(tag_id, {"name": name, "location": location}, ACTOR)
-        for item_name, qty in items:
-            store.add_item(tag_id, item_name, qty, ACTOR)
-    store.set_meta(META_KEY, utc_now())
-    log.info("seeded %d sample boxes", len(SAMPLES))
+    log.info("seeded sample boxes on tags %s", add(store))
     return True
 
 
 def seed_best_effort(store: Store) -> None:
-    if not config.SEED_SAMPLES:
-        return
     try:
         seed(store)
     except Exception:

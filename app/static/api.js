@@ -30,18 +30,22 @@
     return 'request failed (' + status + ')';
   }
 
-  function request(method, path, body) {
+  // with a type the body is sent as it is, without one it is sent as json
+  function request(method, path, body, type) {
     var opts = {
       method: method,
       headers: { 'Accept': 'application/json' },
       credentials: 'same-origin',
       cache: 'no-store',
-      // lets a save finish when the page is closed right after typing
-      keepalive: method !== 'GET',
+      // lets a save finish when the page is closed right after typing. A photo is too big for it.
+      keepalive: method !== 'GET' && !type,
       // the api never redirects, so a redirect can only be the sign-in proxy
       redirect: 'manual'
     };
-    if (body !== undefined) {
+    if (type) {
+      opts.headers['Content-Type'] = type;
+      opts.body = body;
+    } else if (body !== undefined) {
       opts.headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(body);
     }
@@ -109,6 +113,27 @@
       return request('DELETE', '/api/items/' + encodeURIComponent(itemId)).catch(missingIsNull);
     },
 
-    qrUrl: function (tagId) { return '/api/qr/' + tagId + '.svg'; }
+    addBoxPhoto: function (tagId, bytes, type) {
+      return request('POST', '/api/boxes/' + tagId + '/photos', bytes, type);
+    },
+    addItemPhoto: function (itemId, bytes, type) {
+      return request('POST', '/api/items/' + encodeURIComponent(itemId) + '/photos', bytes, type);
+    },
+    // a photo that is already gone counts as removed
+    deletePhoto: function (photoId) {
+      return request('DELETE', '/api/photos/' + encodeURIComponent(photoId)).catch(missingIsNull);
+    },
+
+    // newest first. tag and before are optional, before is the 'at' of the last entry already held
+    history: function (tagId, before, limit) {
+      var q = ['limit=' + limit];
+      if (tagId != null) q.push('tag_id=' + tagId);
+      if (before) q.push('before=' + encodeURIComponent(before));
+      return request('GET', '/api/history?' + q.join('&'));
+    },
+
+    qrUrl: function (tagId) { return '/api/qr/' + tagId + '.svg'; },
+    photoUrl: function (photoId) { return '/api/photos/' + encodeURIComponent(photoId); },
+    thumbUrl: function (photoId) { return '/api/photos/' + encodeURIComponent(photoId) + '/thumb'; }
   };
 })(this);

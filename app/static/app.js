@@ -5,6 +5,7 @@
   var data = app.data;
   var scan = app.scan;
   var editor = app.editor;
+  var photos = app.photos;
 
   var PREVIEW_ITEMS = 6;
 
@@ -12,8 +13,16 @@
   var banner = document.getElementById('banner');
   var bannerText = document.getElementById('bannerText');
   var bannerReload = document.getElementById('bannerReload');
-  var views = { scan: document.getElementById('viewScan'), boxes: document.getElementById('viewBoxes') };
-  var tabs = { scan: document.getElementById('tabScan'), boxes: document.getElementById('tabBoxes') };
+  var views = {
+    scan: document.getElementById('viewScan'),
+    boxes: document.getElementById('viewBoxes'),
+    history: document.getElementById('viewHistory')
+  };
+  var tabs = {
+    scan: document.getElementById('tabScan'),
+    boxes: document.getElementById('tabBoxes'),
+    history: document.getElementById('tabHistory')
+  };
   var boxList = document.getElementById('boxList');
   var boxEmpty = document.getElementById('boxEmpty');
   var boxCount = document.getElementById('boxCount');
@@ -21,6 +30,13 @@
   var newTag = document.getElementById('newTag');
   var newBtn = document.getElementById('newBtn');
   var newHint = document.getElementById('newHint');
+
+  // every tag, newest first. A row opens the box it is about, or the free tag it used to be on.
+  var past = app.log.list(document.getElementById('allHistory'), {
+    pick: function (entry) {
+      if (data.validTag(entry.tag_id)) editor.open(entry.tag_id);
+    }
+  });
 
   var view = null;
   var drawn = '';
@@ -50,6 +66,7 @@
     if (name === 'scan') scan.start();
     else scan.stop();
     if (name === 'boxes') renderBoxes();
+    if (name === 'history') past.load();
   }
 
   function hashView() {
@@ -120,6 +137,11 @@
     if (box.location) body.appendChild(el('span', 'where', box.location));
     body.appendChild(el('span', 'items' + (n ? '' : ' none'), preview(box, q)));
     btn.appendChild(body);
+    if (box.photos.length) {
+      var shot = photos.thumb(box.photos[0], true);
+      shot.className = 'shot';
+      btn.appendChild(shot);
+    }
 
     li.appendChild(btn);
     return li;
@@ -204,6 +226,7 @@
   data.onChange(function () {
     renderBoxes();
     renderNew();
+    if (view === 'history') past.refresh();
   });
 
   scan.onPick(function (tag) { editor.open(tag); });

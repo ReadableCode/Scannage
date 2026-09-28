@@ -3,7 +3,7 @@
 Runs from the FastAPI lifespan (never the docker entrypoint), converges the
 scannage schema inside the configured database, and is version-gated via
 scannage.deploy_meta so it is a no-op on every boot after the first. Only
-additive statements live here and in the SQL file; nothing can touch any
+additive statements live here and in the SQL files; nothing can touch any
 other schema. Failures are logged and the app still serves. The next boot
 retries.
 """
@@ -20,8 +20,10 @@ from . import config
 log = logging.getLogger("scannage.bootstrap")
 
 DEPLOY_DIR = Path(__file__).resolve().parent.parent / "deploy"
-SCHEMA_FILES = ("02_schema.sql",)
-SCHEMA_VERSION = 1
+# A version bump runs every file again, which is safe because each statement
+# is idempotent. That is how a database at an older version is brought up in place.
+SCHEMA_FILES = ("02_schema.sql", "03_history_photos.sql")
+SCHEMA_VERSION = 2
 
 ROLE_SQL = """
 DO $$

@@ -99,7 +99,9 @@ def test_settings_defaults_and_alternate_secret_name(reload_config):
     settings = reload_config(
         SCANNAGE_STORE="",
         SCANNAGE_SQLITE_PATH="",
-        SCANNAGE_SEED_SAMPLES="true",
+        SCANNAGE_HTTPS="",
+        SCANNAGE_HTTPS_HOSTS="",
+        SCANNAGE_TLS_DIR="",
         SCANNAGE_BASE_URL="https://boxes.example.com/",
         APP_SCHEMA="",
         POSTGRES_DB="",
@@ -110,10 +112,71 @@ def test_settings_defaults_and_alternate_secret_name(reload_config):
 
     assert settings.STORE == "sqlite"
     assert settings.SQLITE_PATH == settings.REPO_ROOT / "data" / "scannage.db"
-    assert settings.SEED_SAMPLES is True
+    assert settings.HTTPS is False
+    assert settings.HTTPS_HOSTS == ()
+    assert settings.TLS_DIR == settings.REPO_ROOT / "data" / "tls"
     assert settings.BASE_URL == "https://boxes.example.com"
     assert settings.APP_SCHEMA == "scannage"
     assert settings.POSTGRES_DB == "apps"
     assert settings.POSTGRES_PORT == "5432"
     assert settings.JWT_SECRET == SECRET
     assert (settings.DICTIONARY, settings.TAG_COUNT, settings.PORT) == ("ARUCO_MIP_36h12", 250, 8791)
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE"])
+def test_https_settings(reload_config, tmp_path, value):
+    settings = reload_config(
+        SCANNAGE_HTTPS=value,
+        SCANNAGE_HTTPS_HOSTS=" boxes.example.com , 192.0.2.10,, ",
+        SCANNAGE_TLS_DIR=str(tmp_path / "tls"),
+    )
+
+    assert settings.HTTPS is True
+    assert settings.HTTPS_HOSTS == ("boxes.example.com", "192.0.2.10")
+    assert settings.TLS_DIR == tmp_path / "tls"
+
+
+def test_samples_are_not_a_setting(reload_config):
+    # they belong to a new database, so nothing in the environment can ask for them
+    assert not hasattr(reload_config(SCANNAGE_STORE="sqlite"), "SEED_SAMPLES")
+
+
+# --- photos and history, as far as they go without a server -------------------
+
+
+def test_bytea_travels_as_postgres_hex():
+    raw = bytes(range(256))
+
+    sent = postgrest.to_bytea(raw)
+
+    assert sent.startswith("\\x")
+    assert sent[2:] == raw.hex()
+    assert postgrest.from_bytea(sent) == raw
+    assert postgrest.from_bytea("\\x") == b""
+
+
+@pytest.mark.parametrize("value", ["", "ffd8ff", "\\xnot-hex", "\\377\\330"])
+def test_bytea_in_another_format_is_a_store_error(value):
+    with pytest.raises(postgrest.StoreError):
+        postgrest.from_bytea(value)
+
+
+def test_items_embed_names_its_foreign_key():
+    assert postgrest.BOX_SELECT["select"] == "*,items!items_box_id_fkey(*)"
+    assert postgrest.BOX_SELECT["items.order"] == "created_at.asc,id.asc"
+
+
+def test_photo_lists_never_select_the_bytes():
+    columns = postgrest.PHOTO_SELECT["select"].split(",")
+
+    assert columns == ["id", "box_id", "item_id", "width", "height", "size", "created_at", "created_by"]
+    assert postgrest.PHOTO_SELECT["order"] == "created_at.asc,id.asc"
+
+
+def test_history_is_selected_newest_first():
+    assert postgrest.HISTORY_SELECT["order"] == "at.desc,id.desc"
+
+
+def test_negative_tag_history_is_refused_before_any_request(store):
+    # the address does not resolve, so reaching for the network would raise
+    assert store.list_history(-9001, 50, None) == []

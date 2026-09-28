@@ -39,6 +39,7 @@ def _flag(name: str) -> bool:
 DICTIONARY = "ARUCO_MIP_36h12"
 TAG_COUNT = 250
 PORT = 8791
+LOG_FORMAT = "%(asctime)s %(name)s %(levelname)s %(message)s"
 
 STORES = ("sqlite", "postgrest")
 
@@ -53,7 +54,11 @@ SQLITE_PATH = Path(_env("SCANNAGE_SQLITE_PATH") or REPO_ROOT / "data" / "scannag
 # Empty means "derive it from each request".
 BASE_URL = _env("SCANNAGE_BASE_URL").rstrip("/")
 
-SEED_SAMPLES = _flag("SCANNAGE_SEED_SAMPLES")
+# Off by default. On, the app serves https only, with its own self signed certificate.
+HTTPS = _flag("SCANNAGE_HTTPS")
+# Extra names or addresses for the certificate, on top of the ones found on this machine.
+HTTPS_HOSTS = tuple(host.strip() for host in _env("SCANNAGE_HTTPS_HOSTS").split(",") if host.strip())
+TLS_DIR = Path(_env("SCANNAGE_TLS_DIR") or REPO_ROOT / "data" / "tls")
 
 APP_SCHEMA = _env("APP_SCHEMA") or "scannage"
 

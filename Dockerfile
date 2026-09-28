@@ -13,7 +13,7 @@ COPY deploy ./deploy
 COPY scripts ./scripts
 RUN uv sync --frozen --no-dev
 
-# the sqlite store writes here; mount a volume on it to keep the database
+# the sqlite store and the https certificate live here; mount a volume on it to keep them
 RUN mkdir -p /app/data
 
 ENV PATH="/app/.venv/bin:$PATH"
@@ -24,4 +24,4 @@ COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 ENTRYPOINT ["/docker-entrypoint.sh"]
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8791"]
+CMD ["python", "-m", "app"]

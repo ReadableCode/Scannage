@@ -13,11 +13,14 @@ import time
 import httpx
 import jwt
 
-from .. import bootstrap, config
+from .. import bootstrap, config, samples
 from .base import (
     BOX_FIELDS,
+    HISTORY_KEYS,
     ITEM_FIELDS,
+    PHOTO_KEYS,
     StoreError,
+    attach_photos,
     clean_uuid,
     new_id,
     normalize_timestamp,
@@ -30,21 +33,54 @@ ITEM_KEYS = ("id", "box_id", "name", "qty", "created_at", "updated_at")
 STAMP_KEYS = ("created_at", "updated_at")
 
 # One request returns boxes with their items, both already in contract order.
-BOX_SELECT = {"select": "*,items(*)", "order": "tag_id.asc", "items.order": "created_at.asc,id.asc"}
+# The foreign key is named because photos points at both tables, which can
+# read as a second path between them.
+BOX_SELECT = {
+    "select": "*,items!items_box_id_fkey(*)",
+    "order": "tag_id.asc",
+    "items.order": "created_at.asc,id.asc",
+}
+# Never data or thumb: photos are listed without their bytes and merged in here.
+PHOTO_SELECT = {"select": ",".join(PHOTO_KEYS), "order": "created_at.asc,id.asc"}
+HISTORY_SELECT = {"select": ",".join(HISTORY_KEYS), "order": "at.desc,id.desc"}
 
 # Re-mint this long before expiry so a token never lapses mid-request.
 JWT_REFRESH_MARGIN_SECONDS = 60
 
+# bytea travels through JSON as text in the Postgres hex format
+BYTEA_PREFIX = "\\x"
 
-def _shape(row: dict, keys: tuple[str, ...]) -> dict:
+
+def _shape(row: dict, keys: tuple[str, ...], stamps: tuple[str, ...] = STAMP_KEYS) -> dict:
     shaped = {key: row[key] for key in keys}
-    for key in STAMP_KEYS:
+    for key in stamps:
         shaped[key] = normalize_timestamp(shaped[key])
     return shaped
 
 
 def _shape_box(row: dict) -> dict:
     return {**_shape(row, BOX_KEYS), "items": [_shape(item, ITEM_KEYS) for item in row.get("items") or []]}
+
+
+def _shape_photo(row: dict) -> dict:
+    return _shape(row, PHOTO_KEYS, ("created_at",))
+
+
+def _shape_entry(row: dict) -> dict:
+    return _shape(row, HISTORY_KEYS, ("at",))
+
+
+def to_bytea(value: bytes) -> str:
+    return BYTEA_PREFIX + value.hex()
+
+
+def from_bytea(value: str) -> bytes:
+    if not value.startswith(BYTEA_PREFIX):
+        raise StoreError(502, "postgrest sent a photo that is not in the hex format")
+    try:
+        return bytes.fromhex(value.removeprefix(BYTEA_PREFIX))
+    except ValueError as exc:
+        raise StoreError(502, "postgrest sent a photo that is not in the hex format") from exc
 
 
 class PostgrestStore:
@@ -120,6 +156,10 @@ class PostgrestStore:
 
     def bootstrap(self) -> None:
         bootstrap.bootstrap_best_effort()
+        samples.seed_best_effort(self)
+
+    def apply_schema(self, force: bool = False) -> bool:
+        return bootstrap.apply_schema(force=force)
 
     def health(self) -> tuple[bool, str]:
         try:
@@ -130,12 +170,30 @@ class PostgrestStore:
 
     # --- reads ----------------------------------------------------------------
 
+    def _photos(self, column: str = "", value: str = "") -> list[dict]:
+        where = {column: f"eq.{value}"} if column else {}
+        return [_shape_photo(row) for row in self._call("GET", "photos", {**PHOTO_SELECT, **where})]
+
+    def _box(self, column: str, value: int | str) -> dict | None:
+        rows = self._call("GET", "boxes", {**BOX_SELECT, column: f"eq.{value}"})
+        if not rows:
+            return None
+        box = _shape_box(rows[0])
+        return attach_photos([box], self._photos("box_id", box["id"]))[0]
+
     def list_boxes(self) -> list[dict]:
-        return [_shape_box(row) for row in self._call("GET", "boxes", BOX_SELECT)]
+        boxes = [_shape_box(row) for row in self._call("GET", "boxes", BOX_SELECT)]
+        # one more request for every photo's metadata, however many boxes there are
+        return attach_photos(boxes, self._photos()) if boxes else boxes
 
     def get_box(self, tag_id: int) -> dict | None:
-        rows = self._call("GET", "boxes", {**BOX_SELECT, "tag_id": f"eq.{tag_id}"})
-        return _shape_box(rows[0]) if rows else None
+        return self._box("tag_id", tag_id)
+
+    def get_box_by_id(self, box_id: str) -> dict | None:
+        clean_id = clean_uuid(box_id)
+        if clean_id is None:
+            return None
+        return self._box("id", clean_id)
 
     # --- boxes ----------------------------------------------------------------
 
@@ -179,13 +237,23 @@ class PostgrestStore:
         return box
 
     def delete_box(self, tag_id: int) -> bool:
-        # items go with it through ON DELETE CASCADE
+        # items and photos go with it through ON DELETE CASCADE
         rows = self._call(
             "DELETE", "boxes", {"tag_id": f"eq.{tag_id}", "select": "id"}, prefer="return=representation"
         )
         return bool(rows)
 
     # --- items ----------------------------------------------------------------
+
+    def _shape_item(self, row: dict) -> dict:
+        return {**_shape(row, ITEM_KEYS), "photos": self._photos("item_id", row["id"])}
+
+    def get_item(self, item_id: str) -> dict | None:
+        clean_id = clean_uuid(item_id)
+        if clean_id is None:
+            return None
+        rows = self._call("GET", "items", {"id": f"eq.{clean_id}"})
+        return self._shape_item(rows[0]) if rows else None
 
     def add_item(self, tag_id: int, name: str, qty: int, actor: str) -> dict:
         now = utc_now()
@@ -195,7 +263,7 @@ class PostgrestStore:
         if not rows:
             raise StoreError(502, "postgrest: the new item was not returned")
         self._touch_box(box_id, actor, now)
-        return _shape(rows[0], ITEM_KEYS)
+        return {**_shape(rows[0], ITEM_KEYS), "photos": []}
 
     def update_item(self, item_id: str, fields: dict, actor: str) -> dict | None:
         clean_id = clean_uuid(item_id)
@@ -203,8 +271,7 @@ class PostgrestStore:
             return None
         values = pick(fields, ITEM_FIELDS)
         if not values:
-            rows = self._call("GET", "items", {"id": f"eq.{clean_id}"})
-            return _shape(rows[0], ITEM_KEYS) if rows else None
+            return self.get_item(clean_id)
         now = utc_now()
         rows = self._call(
             "PATCH", "items", {"id": f"eq.{clean_id}"}, {**values, "updated_at": now}, prefer="return=representation"
@@ -212,16 +279,97 @@ class PostgrestStore:
         if not rows:
             return None
         self._touch_box(rows[0]["box_id"], actor, now)
-        return _shape(rows[0], ITEM_KEYS)
+        return self._shape_item(rows[0])
 
     def delete_item(self, item_id: str) -> bool:
         clean_id = clean_uuid(item_id)
         if clean_id is None:
             return False
+        # its photos go with it through ON DELETE CASCADE
         rows = self._call(
             "DELETE", "items", {"id": f"eq.{clean_id}", "select": "id"}, prefer="return=representation"
         )
         return bool(rows)
+
+    # --- photos ---------------------------------------------------------------
+
+    def add_photo(self, box_id: str, item_id: str | None, image: dict, actor: str) -> dict:
+        now = utc_now()
+        row = {
+            "id": new_id(),
+            "box_id": box_id,
+            "item_id": item_id,
+            "width": image["width"],
+            "height": image["height"],
+            "size": len(image["data"]),
+            "created_at": now,
+            "created_by": actor,
+            "data": to_bytea(image["data"]),
+            "thumb": to_bytea(image["thumb"]),
+        }
+        # select keeps the bytes out of the answer
+        rows = self._call(
+            "POST", "photos", {"select": PHOTO_SELECT["select"]}, row, prefer="return=representation"
+        )
+        if not rows:
+            raise StoreError(502, "postgrest: the new photo was not returned")
+        self._touch_box(box_id, actor, now)
+        return _shape_photo(rows[0])
+
+    def get_photo(self, photo_id: str) -> dict | None:
+        clean_id = clean_uuid(photo_id)
+        if clean_id is None:
+            return None
+        photos = self._photos("id", clean_id)
+        return photos[0] if photos else None
+
+    def get_photo_data(self, photo_id: str, thumb: bool = False) -> bytes | None:
+        clean_id = clean_uuid(photo_id)
+        if clean_id is None:
+            return None
+        column = "thumb" if thumb else "data"
+        rows = self._call("GET", "photos", {"select": column, "id": f"eq.{clean_id}"})
+        return from_bytea(rows[0][column]) if rows else None
+
+    def delete_photo(self, photo_id: str) -> bool:
+        clean_id = clean_uuid(photo_id)
+        if clean_id is None:
+            return False
+        rows = self._call(
+            "DELETE", "photos", {"id": f"eq.{clean_id}", "select": "id"}, prefer="return=representation"
+        )
+        return bool(rows)
+
+    # --- history --------------------------------------------------------------
+
+    def add_history(self, entry: dict) -> dict:
+        values = {key: entry[key] for key in HISTORY_KEYS}
+        self._call("POST", "history", None, values, prefer="return=minimal")
+        return values
+
+    def update_history(self, entry_id: str, changes: dict, at: str, box_name: str, item_name: str) -> None:
+        values = {"changes": changes, "at": at, "box_name": box_name, "item_name": item_name}
+        self._call("PATCH", "history", {"id": f"eq.{entry_id}"}, values, prefer="return=minimal")
+
+    def delete_history(self, entry_id: str) -> bool:
+        rows = self._call(
+            "DELETE", "history", {"id": f"eq.{entry_id}", "select": "id"}, prefer="return=representation"
+        )
+        return bool(rows)
+
+    def list_history(
+        self, tag_id: int | None, limit: int, before: str | None, include_tests: bool = False
+    ) -> list[dict]:
+        params = {**HISTORY_SELECT, "limit": str(limit)}
+        if tag_id is not None:
+            if tag_id < 0 and not include_tests:
+                return []
+            params["tag_id"] = f"eq.{tag_id}"
+        elif not include_tests:
+            params["tag_id"] = "gte.0"
+        if before is not None:
+            params["at"] = f"lt.{before}"
+        return [_shape_entry(row) for row in self._call("GET", "history", params)]
 
     # --- meta -----------------------------------------------------------------
 

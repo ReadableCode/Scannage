@@ -77,10 +77,27 @@ input[type="search"]::-webkit-search-decoration { -webkit-appearance: none; }
 .btn.warn { color: var(--dot-red); }
 .btn.warnSolid { background: var(--dot-red); color: var(--bg); font-weight: 600; }
 .btn:disabled { opacity: .5; cursor: default; }
-.btn:focus-visible, #tabs a:focus-visible, .boxRow:focus-visible { outline: 1px solid var(--green-bright); outline-offset: 2px; }
+.btn:focus-visible, #tabs a:focus-visible, .boxRow:focus-visible,
+.quiet:focus-visible, .thumb:focus-visible, .logRow:focus-visible {
+  outline: 1px solid var(--green-bright);
+  outline-offset: 2px;
+}
 
-.hint, .small { margin: .45rem 0 0; font-size: .78rem; color: var(--muted); }
-.err { color: var(--dot-red); }
+/* a control that stays out of the way until it is wanted */
+.quiet {
+  min-height: 40px;
+  padding: 0;
+  background: none;
+  border: 0;
+  font-size: .8rem;
+  color: var(--muted);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.quiet:disabled { color: var(--ink-2); cursor: default; }
+
+.hint, .small, .note { margin: .45rem 0 0; font-size: .78rem; color: var(--muted); }
+.err, .note.err { color: var(--dot-red); }
 .empty { margin: 1.2rem 0; color: var(--ink-2); }
 
 /* -------------------------------------------------------------------- top */
@@ -179,7 +196,7 @@ input[type="search"]::-webkit-search-decoration { -webkit-appearance: none; }
 #start .err { min-height: 1.4em; margin: .8rem 0 0; color: var(--dot-red); }
 #start .small { color: var(--muted); }
 
-#viewBoxes { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+#viewBoxes, #viewHistory { overflow-y: auto; -webkit-overflow-scrolling: touch; }
 .page {
   max-width: 860px;
   margin: 0 auto;
@@ -212,6 +229,41 @@ input[type="search"]::-webkit-search-decoration { -webkit-appearance: none; }
 .boxRow .n { flex: none; font-size: .74rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 .boxRow .where { font-size: .8rem; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .boxRow .items { font-size: .8rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.boxRow .shot {
+  flex: none;
+  align-self: center;
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+/* ---------------------------------------------------------------- history */
+
+.log ul { list-style: none; margin: 0; padding: 0; }
+.log li { border-bottom: 1px solid var(--border); }
+.logRow {
+  display: block;
+  width: 100%;
+  padding: 8px 0;
+  text-align: left;
+  background: none;
+  border: 0;
+}
+button.logRow { cursor: pointer; touch-action: manipulation; }
+.logRow .what { display: block; font-size: .85rem; color: var(--ink-2); overflow-wrap: anywhere; }
+.logRow .box { color: var(--ink); }
+.logRow .meta {
+  display: block;
+  margin-top: 2px;
+  font-size: .74rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.log .note { margin: .7rem 0; }
+.log .quiet { margin-top: 4px; }
 
 /* ------------------------------------------------------------------- tabs */
 
@@ -321,6 +373,109 @@ input[type="search"]::-webkit-search-decoration { -webkit-appearance: none; }
 .danger { margin-top: 1.6rem; padding-top: 1rem; border-top: 1px solid var(--border); }
 .confirm p { margin: 0 0 .8rem; color: var(--amber-bright); font-size: .85rem; }
 .confirm .btn { margin-right: 8px; }
+
+.thumbs { display: flex; flex-wrap: wrap; gap: 8px; }
+.thumb {
+  position: relative;
+  flex: none;
+  width: 64px;
+  height: 64px;
+  padding: 0;
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+#photoAdd { margin-top: 4px; }
+
+/* the end of an item row, as wide as the buttons beside it with or without a photo */
+#items .shot { flex: none; display: flex; }
+#items .word {
+  padding: 0 2px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+  font-size: .74rem;
+}
+#items .word:disabled { opacity: .7; }
+#items .thumb { width: 40px; height: 40px; padding: 0; }
+#items .thumb .n {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  padding: 0 4px;
+  background: var(--bg);
+  border-top-left-radius: 6px;
+  font-size: .68rem;
+  line-height: 1.3;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+#items li.noted { flex-wrap: wrap; }
+#items .note { flex: 0 0 100%; margin: 0 0 4px; padding-left: 6px; }
+
+.past { margin-top: .6rem; }
+h2.split { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+h2 .quiet { min-height: 0; margin: -8px 0; padding: 8px 0 8px 16px; font-weight: 500; }
+
+.unseen {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* ----------------------------------------------------------------- viewer */
+
+#viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  background: var(--bg);
+}
+.viewerHead, .viewerFoot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--surface);
+}
+.viewerHead { border-bottom: 1px solid var(--border); }
+.viewerHead .count {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: .8rem;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.viewerFoot { flex-wrap: wrap; border-top: 1px solid var(--border); }
+.viewerFoot .btn { padding: .55rem .8rem; }
+.viewerFoot .warn { margin-left: auto; }
+.viewerFoot.confirm p { flex: 0 0 100%; margin: 0; }
+.viewerFoot.confirm .btn { margin: 0; }
+#viewerStage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#viewerImg { display: block; min-width: 0; min-height: 0; max-width: 100%; max-height: 100%; object-fit: contain; }
+#viewer .note { flex: none; margin: 0; padding: 8px 12px; }
 
 /* a side panel once there is room, so the list or the camera stays in view */
 @media (min-width: 900px) {

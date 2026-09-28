@@ -44,6 +44,11 @@
     var map = {};
     list.forEach(function (box) {
       if (!Array.isArray(box.items)) box.items = [];
+      // a server from before photos sends no lists
+      if (!Array.isArray(box.photos)) box.photos = [];
+      box.items.forEach(function (it) {
+        if (!Array.isArray(it.photos)) it.photos = [];
+      });
       map[box.tag_id] = box;
     });
     data.boxes = list.slice().sort(function (a, b) { return a.tag_id - b.tag_id; });
@@ -161,6 +166,11 @@
       });
     }
     return items;
+  };
+
+  // photos on the box and on its items
+  data.photoCount = function (box) {
+    return box.items.reduce(function (n, it) { return n + it.photos.length; }, box.photos.length);
   };
 
   data.title = function (tagId, box) {

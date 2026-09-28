@@ -1,12 +1,17 @@
 # Standalone: one container and a SQLite file. Nothing else is needed.
 #   docker compose up -d --build
-# Phone browsers only open the camera on https, so put a reverse proxy with a
-# certificate in front of it for anything other than localhost.
+# Phone browsers only open the camera on https. Either put a reverse proxy
+# with a certificate in front of it, or turn on the built in https below.
 services:
   scannage:
     build: .
     environment:
       SCANNAGE_STORE: sqlite
+      # Built in https with a self signed certificate, kept in the data volume.
+      # List the name or address the phone opens, since the container cannot
+      # see the host's own.
+      # SCANNAGE_HTTPS: "1"
+      # SCANNAGE_HTTPS_HOSTS: "boxes.example.com"
     volumes:
       - scannage_data:/app/data
     ports:

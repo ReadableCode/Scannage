@@ -58,11 +58,19 @@
       <p id="boxEmpty" class="empty" hidden></p>
     </div>
   </section>
+
+  <section id="viewHistory" class="view" hidden>
+    <div class="page">
+      <h2><span class="sl">//</span> history</h2>
+      <div id="allHistory" class="log"></div>
+    </div>
+  </section>
 </main>
 
 <nav id="tabs">
   <a id="tabScan" href="#scan">scan</a>
   <a id="tabBoxes" href="#boxes">boxes</a>
+  <a id="tabHistory" href="#history">history</a>
   <a id="tabLabels" href="/labels">labels</a>
 </nav>
 
@@ -88,6 +96,11 @@
     <button class="btn secondary" type="submit">add</button>
   </form>
 
+  <h2 id="photosHead" hidden><span class="sl">//</span> photos</h2>
+  <div id="boxPhotos" class="thumbs" hidden></div>
+  <button id="photoAdd" class="quiet" type="button">add a photo</button>
+  <p id="photoNote" class="note err" role="status" hidden></p>
+
   <div id="deleteRow" class="danger" hidden>
     <button id="deleteBtn" class="btn secondary warn" type="button">delete box</button>
   </div>
@@ -96,13 +109,47 @@
     <button id="confirmYes" class="btn warnSolid" type="button">delete</button>
     <button id="confirmNo" class="btn secondary" type="button">keep</button>
   </div>
+
+  <div class="past">
+    <button id="historyOpen" class="quiet" type="button" aria-expanded="false">history</button>
+    <div id="historyBody" hidden>
+      <h2 class="split"><span><span class="sl">//</span> history</span>
+        <button id="historyHide" class="quiet" type="button">hide</button></h2>
+      <div id="boxHistory" class="log"></div>
+    </div>
+  </div>
+
+  <input id="photoFile" class="unseen" type="file" accept="image/jpeg,image/png,image/webp"
+    tabindex="-1" aria-hidden="true">
 </aside>
+
+<div id="viewer" role="dialog" aria-modal="true" aria-label="photo" hidden>
+  <div class="viewerHead">
+    <span id="viewerCount" class="count"></span>
+    <button id="viewerAdd" class="quiet" type="button" hidden>add another</button>
+    <button id="viewerClose" class="btn primary" type="button">close</button>
+  </div>
+  <div id="viewerStage"><img id="viewerImg" alt=""></div>
+  <p id="viewerNote" class="note err" role="status" hidden></p>
+  <div id="viewerBar" class="viewerFoot">
+    <button id="viewerPrev" class="btn secondary" type="button">previous</button>
+    <button id="viewerNext" class="btn secondary" type="button">next</button>
+    <button id="viewerRemove" class="btn secondary warn" type="button">remove photo</button>
+  </div>
+  <div id="viewerConfirm" class="viewerFoot confirm" hidden>
+    <p>remove this photo? it cannot be brought back.</p>
+    <button id="viewerYes" class="btn warnSolid" type="button">remove</button>
+    <button id="viewerNo" class="btn secondary" type="button">keep</button>
+  </div>
+</div>
 
 <script src="/static/vendor/cv.js?v=__ASSET_VERSION__"></script>
 <script src="/static/vendor/aruco.js?v=__ASSET_VERSION__"></script>
 <script src="/static/api.js?v=__ASSET_VERSION__"></script>
 <script src="/static/data.js?v=__ASSET_VERSION__"></script>
 <script src="/static/scan.js?v=__ASSET_VERSION__"></script>
+<script src="/static/photos.js?v=__ASSET_VERSION__"></script>
+<script src="/static/log.js?v=__ASSET_VERSION__"></script>
 <script src="/static/editor.js?v=__ASSET_VERSION__"></script>
 <script src="/static/app.js?v=__ASSET_VERSION__"></script>
 </body>

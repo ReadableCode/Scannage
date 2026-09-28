@@ -11,7 +11,6 @@ services:
     environment:
       TZ: America/Chicago
       SCANNAGE_STORE: postgrest
-      SCANNAGE_SEED_SAMPLES: "1"
       APP_SCHEMA: scannage
       POSTGREST_URL: http://postgrest:3000
       POSTGRES_URL: postgres

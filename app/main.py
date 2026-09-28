@@ -10,20 +10,22 @@ from __future__ import annotations
 import hashlib
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path as FilePath
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Path, Request, Response
+from fastapi import FastAPI, HTTPException, Path, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StringConstraints
 from starlette.concurrency import run_in_threadpool
 
-from . import config, qr, samples
+from . import config, history, photos, qr
 from .stores import StoreError, get_store
+from .stores.base import normalize_timestamp
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO, format=config.LOG_FORMAT)
 log = logging.getLogger("scannage")
 
 STATIC_DIR = FilePath(__file__).resolve().parent / "static"
@@ -32,6 +34,8 @@ STATIC_DIR.mkdir(exist_ok=True)
 
 ASSET_PLACEHOLDER = "__ASSET_VERSION__"
 MAX_ACTOR_LENGTH = 120
+# A photo never changes once stored, so its address can be cached for good.
+PHOTO_CACHE = "private, max-age=31536000, immutable"
 
 _asset_version = ""
 
@@ -59,8 +63,8 @@ async def _lifespan(app: FastAPI):
     global _asset_version
     store = get_store()
     log.info("store: %s", store.name)
+    # the schema, and on a new database the sample boxes
     await run_in_threadpool(store.bootstrap)
-    await run_in_threadpool(samples.seed_best_effort, store)
     _asset_version = await run_in_threadpool(_hash_static)
     log.info("asset version: %s", _asset_version)
     yield
@@ -190,13 +194,13 @@ async def get_box(tag_id: TagId):
 async def put_box(tag_id: TagId, request: Request, body: BoxBody | None = None):
     _require_same_origin(request)
     fields = body.model_dump(exclude_none=True) if body else {}
-    return await run_in_threadpool(get_store().upsert_box, tag_id, fields, _actor(request))
+    return await run_in_threadpool(history.put_box, get_store(), tag_id, fields, _actor(request))
 
 
 @app.delete("/api/boxes/{tag_id}", status_code=204)
 async def delete_box(tag_id: TagId, request: Request):
     _require_same_origin(request)
-    if not await run_in_threadpool(get_store().delete_box, tag_id):
+    if not await run_in_threadpool(history.delete_box, get_store(), tag_id, _actor(request)):
         raise HTTPException(status_code=404, detail="no box on this tag")
     return Response(status_code=204)
 
@@ -207,14 +211,14 @@ async def delete_box(tag_id: TagId, request: Request):
 @app.post("/api/boxes/{tag_id}/items", status_code=201)
 async def add_item(tag_id: TagId, body: ItemBody, request: Request):
     _require_same_origin(request)
-    return await run_in_threadpool(get_store().add_item, tag_id, body.name, body.qty, _actor(request))
+    return await run_in_threadpool(history.add_item, get_store(), tag_id, body.name, body.qty, _actor(request))
 
 
 @app.patch("/api/items/{item_id}")
 async def patch_item(item_id: str, body: ItemPatchBody, request: Request):
     _require_same_origin(request)
     fields = body.model_dump(exclude_none=True)
-    item = await run_in_threadpool(get_store().update_item, item_id, fields, _actor(request))
+    item = await run_in_threadpool(history.update_item, get_store(), item_id, fields, _actor(request))
     if item is None:
         raise HTTPException(status_code=404, detail="no such item")
     return item
@@ -223,9 +227,128 @@ async def patch_item(item_id: str, body: ItemPatchBody, request: Request):
 @app.delete("/api/items/{item_id}", status_code=204)
 async def delete_item(item_id: str, request: Request):
     _require_same_origin(request)
-    if not await run_in_threadpool(get_store().delete_item, item_id):
+    if not await run_in_threadpool(history.delete_item, get_store(), item_id, _actor(request)):
         raise HTTPException(status_code=404, detail="no such item")
     return Response(status_code=204)
+
+
+# --- photos -------------------------------------------------------------------
+
+
+async def _read_upload(request: Request) -> bytes:
+    """The request body, given up on as soon as it passes the limit."""
+    too_large = HTTPException(status_code=413, detail=f"a photo can be at most {photos.MAX_UPLOAD_BYTES} bytes")
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > photos.MAX_UPLOAD_BYTES:
+        raise too_large
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > photos.MAX_UPLOAD_BYTES:
+            raise too_large
+    return bytes(body)
+
+
+def _process_upload(raw: bytes) -> dict:
+    try:
+        return photos.process(raw)
+    except photos.PhotoError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _require_room(owner: dict, what: str) -> None:
+    if len(owner["photos"]) >= photos.MAX_PER_OWNER:
+        raise HTTPException(status_code=409, detail=f"{what} already holds {photos.MAX_PER_OWNER} photos")
+
+
+def _add_box_photo(tag_id: int, raw: bytes, actor: str) -> dict:
+    store = get_store()
+    image = _process_upload(raw)
+    box = store.get_box(tag_id)
+    if box is None:
+        box = history.put_box(store, tag_id, {}, actor)
+    _require_room(box, "this box")
+    return history.add_photo(store, box["id"], None, image, actor)
+
+
+def _add_item_photo(item_id: str, raw: bytes, actor: str) -> dict:
+    store = get_store()
+    image = _process_upload(raw)
+    item = store.get_item(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="no such item")
+    _require_room(item, "this item")
+    return history.add_photo(store, item["box_id"], item["id"], image, actor)
+
+
+@app.post("/api/boxes/{tag_id}/photos", status_code=201)
+async def add_box_photo(tag_id: TagId, request: Request):
+    _require_same_origin(request)
+    raw = await _read_upload(request)
+    return await run_in_threadpool(_add_box_photo, tag_id, raw, _actor(request))
+
+
+@app.post("/api/items/{item_id}/photos", status_code=201)
+async def add_item_photo(item_id: str, request: Request):
+    _require_same_origin(request)
+    if await run_in_threadpool(get_store().get_item, item_id) is None:
+        raise HTTPException(status_code=404, detail="no such item")
+    raw = await _read_upload(request)
+    return await run_in_threadpool(_add_item_photo, item_id, raw, _actor(request))
+
+
+async def _photo_response(photo_id: str, thumb: bool) -> Response:
+    data = await run_in_threadpool(get_store().get_photo_data, photo_id, thumb)
+    if data is None:
+        raise HTTPException(status_code=404, detail="no such photo")
+    return Response(data, media_type="image/jpeg", headers={"Cache-Control": PHOTO_CACHE})
+
+
+@app.get("/api/photos/{photo_id}")
+async def get_photo(photo_id: str):
+    return await _photo_response(photo_id, thumb=False)
+
+
+@app.get("/api/photos/{photo_id}/thumb")
+async def get_photo_thumb(photo_id: str):
+    return await _photo_response(photo_id, thumb=True)
+
+
+@app.delete("/api/photos/{photo_id}", status_code=204)
+async def delete_photo(photo_id: str, request: Request):
+    _require_same_origin(request)
+    if not await run_in_threadpool(history.delete_photo, get_store(), photo_id, _actor(request)):
+        raise HTTPException(status_code=404, detail="no such photo")
+    return Response(status_code=204)
+
+
+# --- history ------------------------------------------------------------------
+
+
+def _before(value: str | None) -> str | None:
+    """The page marker in the app's own timestamp format, which is what the stores compare against."""
+    if value is None or not value.strip():
+        return None
+    value = value.strip()
+    # a "+" sent without encoding arrives as a space
+    for candidate in (value, value.replace(" ", "+")):
+        try:
+            stamp = datetime.fromisoformat(candidate)
+        except ValueError:
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return normalize_timestamp(stamp.isoformat())
+    raise HTTPException(status_code=422, detail="before: not a timestamp")
+
+
+@app.get("/api/history")
+async def list_history(
+    tag_id: Annotated[int | None, Query(ge=0, lt=config.TAG_COUNT)] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    before: str | None = None,
+):
+    return await run_in_threadpool(get_store().list_history, tag_id, limit, _before(before))
 
 
 # --- labels -------------------------------------------------------------------

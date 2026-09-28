@@ -4,6 +4,7 @@
   var app = root.Scannage = root.Scannage || {};
   var data = app.data;
   var api = app.api;
+  var photos = app.photos;
 
   var SAVE_MS = 400;
   var QTY_MS = 300;
@@ -24,11 +25,22 @@
   var confirmText = document.getElementById('confirmText');
   var confirmYes = document.getElementById('confirmYes');
   var confirmNo = document.getElementById('confirmNo');
+  var photosHead = document.getElementById('photosHead');
+  var boxPhotos = document.getElementById('boxPhotos');
+  var photoAdd = document.getElementById('photoAdd');
+  var photoNote = document.getElementById('photoNote');
+  var historyOpen = document.getElementById('historyOpen');
+  var historyBody = document.getElementById('historyBody');
+  var historyHide = document.getElementById('historyHide');
 
   // the box being edited. A session outlives the open sheet until its last request settles.
   var cur = null;
   var seq = 0;
   var closeFns = [];
+  var pastOpen = false;
+  var past = app.log.list(document.getElementById('boxHistory'), {
+    tag: function () { return cur ? cur.tag : null; }
+  });
 
   function session(tag) {
     return {
@@ -36,6 +48,10 @@
       exists: false,
       fields: { name: '', location: '', notes: '' },
       items: [],
+      // the photos of the box itself. An item carries its own in the same three fields.
+      photos: [],
+      sending: false,
+      note: '',
       dirty: false,
       saving: null,
       timer: null,
@@ -72,8 +88,9 @@
       notes: box ? box.notes || '' : ''
     };
     c.items = box ? box.items.map(function (it) {
-      return { id: it.id, name: it.name, qty: it.qty };
+      return { id: it.id, name: it.name, qty: it.qty, photos: (it.photos || []).slice() };
     }) : [];
+    c.photos = box ? (box.photos || []).slice() : [];
   }
 
   function fillFields(c) {
@@ -89,10 +106,16 @@
     if (!c.exists) confirmRow.hidden = true;
   }
 
+  function samePhotos(a, b) {
+    if (a.length !== b.length) return false;
+    return a.every(function (photo, i) { return photo.id === b[i].id; });
+  }
+
   function sameItems(a, b) {
     if (a.length !== b.length) return false;
     return a.every(function (it, i) {
-      return it.id === b[i].id && it.name === b[i].name && it.qty === b[i].qty;
+      return it.id === b[i].id && it.name === b[i].name && it.qty === b[i].qty &&
+        samePhotos(it.photos, b[i].photos);
     });
   }
 
@@ -105,11 +128,14 @@
     if (c !== cur || c.ops) return;
     var editing = c.dirty || c.saving;
     var before = c.items;
+    var shots = c.photos;
     var fields = c.fields;
     apply(c, box);
     if (editing) c.fields = fields;
     else fillFields(c);
     renderHead(c);
+    if (samePhotos(shots, c.photos)) c.photos = shots;
+    else renderPhotos();
     // the rows on screen are bound to the objects in the old list, so it stays unless it has to go
     if (sameItems(before, c.items) || typingInItems()) c.items = before;
     else renderItems();
@@ -170,6 +196,10 @@
 
   // ------------------------------------------------------------------ items
 
+  function count(n, word) {
+    return n + ' ' + word + (n === 1 ? '' : 's');
+  }
+
   function button(label, title, fn) {
     var b = document.createElement('button');
     b.type = 'button';
@@ -193,6 +223,10 @@
     c.items.forEach(function (it) {
       var li = document.createElement('li');
       if (it.pending) li.className = 'pending';
+      var shot = document.createElement('span');
+      shot.className = 'shot';
+      it.row = li;
+      it.shot = shot;
 
       var name = document.createElement('input');
       name.type = 'text';
@@ -220,7 +254,8 @@
       rm.className = 'rm';
       rm.disabled = !!it.pending;
 
-      [name, minus, qty, plus, rm].forEach(function (el) { li.appendChild(el); });
+      [name, minus, qty, plus, shot, rm].forEach(function (el) { li.appendChild(el); });
+      drawShot(c, it);
       itemsEl.appendChild(li);
     });
   }
@@ -255,7 +290,7 @@
 
   function addItem(name) {
     var c = cur;
-    var tmp = { id: 'new-' + (++seq), name: name, qty: 1, pending: true };
+    var tmp = { id: 'new-' + (++seq), name: name, qty: 1, photos: [], pending: true };
     c.items.push(tmp);
     c.ops++;
     setState('saving');
@@ -358,13 +393,172 @@
     addName.focus();
   });
 
+  // ----------------------------------------------------------------- photos
+
+  function itemById(c, id) {
+    for (var i = 0; i < c.items.length; i++) {
+      if (c.items[i].id === id) return c.items[i];
+    }
+    return null;
+  }
+
+  function photoCount(c) {
+    return c.items.reduce(function (n, it) { return n + it.photos.length; }, c.photos.length);
+  }
+
+  function renderPhotos() {
+    var c = cur;
+    var list = c ? c.photos : [];
+    photosHead.hidden = boxPhotos.hidden = !list.length;
+    boxPhotos.textContent = '';
+    list.forEach(function (photo, i) {
+      var b = button('', 'photo ' + (i + 1) + ' of ' + list.length, function () { viewPhotos(c, null, i); });
+      b.className = 'thumb';
+      b.appendChild(photos.thumb(photo));
+      boxPhotos.appendChild(b);
+    });
+    photoAdd.disabled = !c || c.sending;
+    photoAdd.textContent = c && c.sending ? 'sending photo' : 'add a photo';
+    photoNote.textContent = c ? c.note : '';
+    photoNote.hidden = !c || !c.note;
+  }
+
+  // the end of an item row: the word photo, or the first photo once there is one.
+  // Filled in place, so a photo that lands while a name is being typed does not take the field away.
+  function drawShot(c, it) {
+    if (!it.shot) return;
+    var n = it.photos.length;
+    var b;
+    if (it.sending || !n) {
+      b = button(it.sending ? 'sending' : 'photo', 'add a photo of ' + it.name, function () { pickPhoto(c, it.id); });
+      b.className = 'word';
+      b.disabled = !!it.pending || !!it.sending;
+    } else {
+      b = button('', count(n, 'photo') + ' of ' + it.name, function () { viewPhotos(c, it.id, 0); });
+      b.className = 'thumb';
+      b.appendChild(photos.thumb(it.photos[0]));
+      if (n > 1) {
+        var badge = document.createElement('span');
+        badge.className = 'n';
+        badge.textContent = n;
+        b.appendChild(badge);
+      }
+    }
+    it.shot.textContent = '';
+    it.shot.appendChild(b);
+
+    var old = it.row.querySelector('.note');
+    if (old) it.row.removeChild(old);
+    it.row.classList.toggle('noted', !!it.note);
+    if (it.note) {
+      var note = document.createElement('span');
+      note.className = 'note err';
+      note.textContent = it.note;
+      it.row.appendChild(note);
+    }
+  }
+
+  function drawPhotos(c, it) {
+    if (c !== cur) return;
+    if (it) drawShot(c, it);
+    else renderPhotos();
+  }
+
+  function pickPhoto(c, id) {
+    photos.pick(function (file) { addPhoto(c, id, file); });
+  }
+
+  // id names the item, or is null for a photo of the box itself
+  function addPhoto(c, id, file) {
+    var it = id ? itemById(c, id) : null;
+    if (id && !it) return;
+    var target = it || c;
+    target.sending = true;
+    target.note = '';
+    c.ops++;
+    if (c === cur) setState('saving');
+    drawPhotos(c, it);
+    photos.prepare(file).then(function (p) {
+      return it ? api.addItemPhoto(it.id, p.bytes, p.type) : api.addBoxPhoto(c.tag, p.bytes, p.type);
+    }).then(function (photo) {
+      target.sending = false;
+      target.photos.push(photo);
+      c.exists = true;
+      if (c === cur) renderHead(c);
+      drawPhotos(c, it);
+      opDone(c);
+    }, function (err) {
+      target.sending = false;
+      target.note = photos.reason(err);
+      c.ops = Math.max(0, c.ops - 1);
+      if (err && (err.kind === 'session' || err.kind === 'network')) data.fail(err);
+      if (c === cur) setState('error', 'photo not saved');
+      drawPhotos(c, it);
+      data.refresh();
+    });
+  }
+
+  function removePhoto(c, id, photo) {
+    c.ops++;
+    if (c === cur) setState('saving');
+    return api.deletePhoto(photo.id).then(function () {
+      var target = id ? itemById(c, id) : c;
+      if (target) {
+        target.photos = target.photos.filter(function (p) { return p.id !== photo.id; });
+        drawPhotos(c, id ? target : null);
+      }
+      opDone(c);
+    }, function (err) {
+      opFailed(c, err);
+      throw err;
+    });
+  }
+
+  function viewPhotos(c, id, at) {
+    var it = id ? itemById(c, id) : null;
+    if (id && !it) return;
+    photos.view({
+      list: it ? it.photos : c.photos,
+      at: at,
+      title: it ? it.name : '',
+      remove: function (photo) { return removePhoto(c, id, photo); },
+      // the row of an item has no room for a second control, so more are added from here
+      add: it ? function () { pickPhoto(c, id); } : null
+    });
+  }
+
+  photoAdd.addEventListener('click', function () {
+    if (cur) pickPhoto(cur, null);
+  });
+
+  // ---------------------------------------------------------------- history
+
+  function showPast(on) {
+    pastOpen = on;
+    historyOpen.hidden = on;
+    historyBody.hidden = !on;
+    if (!on) {
+      past.clear();
+      return;
+    }
+    past.load().then(function () {
+      // the list opens below the fold, so bring its heading up
+      if (pastOpen) sheet.scrollTop += historyBody.getBoundingClientRect().top - sheet.getBoundingClientRect().top - 12;
+    });
+  }
+
+  historyOpen.addEventListener('click', function () {
+    if (cur) showPast(true);
+  });
+  historyHide.addEventListener('click', function () { showPast(false); });
+
   // ------------------------------------------------------------- delete box
 
   deleteBtn.addEventListener('click', function () {
     if (!cur) return;
-    var n = cur.items.length;
-    confirmText.textContent = 'delete box ' + data.pad(cur.tag) + ' and its ' + n +
-      (n === 1 ? ' item' : ' items') + '? the tag becomes free.';
+    var shots = photoCount(cur);
+    confirmText.textContent = 'delete box ' + data.pad(cur.tag) + ' and its ' + count(cur.items.length, 'item') +
+      (shots ? ' and ' + count(shots, 'photo') : '') + '? the tag becomes free.';
     deleteRow.hidden = true;
     confirmRow.hidden = false;
   });
@@ -387,6 +581,7 @@
       data.remove(c.tag);
       c.exists = false;
       c.items = [];
+      c.photos = [];
       if (c === cur) hide();
       data.refresh();
     }, function (err) {
@@ -418,12 +613,13 @@
   }
 
   function blank(box) {
-    return !box.name && !box.location && !box.notes && !(box.items && box.items.length);
+    return !box.name && !box.location && !box.notes && !(box.items && box.items.length) &&
+      !(box.photos && box.photos.length);
   }
 
   // a box left with nothing in it gives its tag back, checked against the server copy first
   function freeIfBlank(c) {
-    if (!c.exists || c.items.length) return Promise.resolve();
+    if (!c.exists || c.items.length || c.photos.length) return Promise.resolve();
     if (c.fields.name.trim() || c.fields.location.trim() || c.fields.notes.trim()) return Promise.resolve();
     return api.box(c.tag).then(function (box) {
       if (!box || !blank(box)) return;
@@ -435,6 +631,8 @@
 
   function hide() {
     cur = null;
+    photos.close();
+    showPast(false);
     sheet.hidden = true;
     document.body.classList.remove('editing');
     if (document.activeElement && sheet.contains(document.activeElement)) document.activeElement.blur();
@@ -467,8 +665,10 @@
     boxNotes.value = c.fields.notes;
     addName.value = '';
     confirmRow.hidden = true;
+    showPast(false);
     renderHead(c);
     renderItems();
+    renderPhotos();
     setState('');
     sheet.hidden = false;
     sheet.scrollTop = 0;
@@ -488,6 +688,8 @@
   });
 
   data.onChange(function () {
+    // every write ends in a refresh of the boxes, so this is also where history catches up
+    if (cur && pastOpen) past.refresh();
     if (!cur || cur.ops) return;
     adopt(cur, data.byTag[cur.tag] || null);
   });

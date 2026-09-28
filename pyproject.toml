@@ -11,6 +11,8 @@ dependencies = [
     "PyJWT>=2.8",
     "psycopg[binary]>=3.2",
     "segno>=1.6",
+    "Pillow>=10.3",
+    "cryptography>=42",
 ]
 
 [dependency-groups]
