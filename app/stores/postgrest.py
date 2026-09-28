@@ -20,6 +20,7 @@ from .base import (
     ITEM_FIELDS,
     KEPT_PHOTO_KEYS,
     PHOTO_KEYS,
+    PRINTED_KEYS,
     StoreError,
     attach_photos,
     chunks,
@@ -27,6 +28,7 @@ from .base import (
     clean_uuids,
     new_id,
     normalize_timestamp,
+    once_each,
     pick,
     utc_now,
 )
@@ -50,6 +52,9 @@ KEPT_PHOTOS = "kept_photos"
 # Ids per request when filtering by a set of them, which keeps the address under about 4000 characters.
 ID_CHUNK = 80
 HISTORY_SELECT = {"select": ",".join(HISTORY_KEYS), "order": "at.desc,id.desc"}
+PRINTED_TAGS = "printed_tags"
+PRINTED_SELECT = {"select": ",".join(PRINTED_KEYS), "order": "tag_id.asc"}
+PRINTED_STAMPS = ("first_printed_at", "last_printed_at")
 
 # Re-mint this long before expiry so a token never lapses mid-request.
 JWT_REFRESH_MARGIN_SECONDS = 60
@@ -79,6 +84,30 @@ def _shape_kept_photo(row: dict) -> dict:
 
 def _shape_entry(row: dict) -> dict:
     return _shape(row, HISTORY_KEYS, ("at",))
+
+
+def _shape_printed(row: dict) -> dict:
+    return _shape(row, PRINTED_KEYS, PRINTED_STAMPS)
+
+
+def printed_rows(tag_ids: list[int], known: dict[int, dict], now: str, actor: str) -> list[dict]:
+    """What one print writes: a row per tag, every row with the same keys, as a bulk insert needs.
+
+    A tag printed before keeps its first time and counts one more.
+    """
+    rows = []
+    for tag_id in tag_ids:
+        before = known.get(tag_id)
+        rows.append(
+            {
+                "tag_id": tag_id,
+                "first_printed_at": before["first_printed_at"] if before else now,
+                "last_printed_at": now,
+                "times": before["times"] + 1 if before else 1,
+                "printed_by": actor,
+            }
+        )
+    return rows
 
 
 def to_bytea(value: bytes) -> str:
@@ -146,7 +175,7 @@ class PostgrestStore:
         method: str,
         table: str,
         params: dict | None = None,
-        body: dict | None = None,
+        body: dict | list[dict] | None = None,
         prefer: str = "",
     ) -> list[dict]:
         write = method != "GET"
@@ -213,6 +242,11 @@ class PostgrestStore:
         boxes = [_shape_box(row) for row in self._call("GET", "boxes", BOX_SELECT)]
         # one more request for every photo's metadata, however many boxes there are
         return attach_photos(boxes, self._photos()) if boxes else boxes
+
+    def list_tag_ids(self) -> list[int]:
+        # which tags have a box, without reading what is in them
+        rows = self._call("GET", "boxes", {"select": "tag_id", "order": "tag_id.asc"})
+        return [row["tag_id"] for row in rows]
 
     def get_box(self, tag_id: int) -> dict | None:
         return self._box("tag_id", tag_id)
@@ -436,6 +470,35 @@ class PostgrestStore:
         if before is not None:
             params["at"] = f"lt.{before}"
         return [_shape_entry(row) for row in self._call("GET", "history", params)]
+
+    # --- printed labels -------------------------------------------------------
+
+    def list_printed(self) -> list[dict]:
+        return [_shape_printed(row) for row in self._call("GET", PRINTED_TAGS, PRINTED_SELECT)]
+
+    def record_printed(self, tag_ids: list[int], actor: str) -> None:
+        wanted = once_each(tag_ids)
+        if not wanted:
+            return
+        now = utc_now()
+        # one request for what is there, one for the whole print. The API sends at most
+        # 250 ids, which fit in one address.
+        where = {"tag_id": f"in.({','.join(str(tag_id) for tag_id in wanted)})"}
+        rows = self._call("GET", PRINTED_TAGS, {**PRINTED_SELECT, **where})
+        known = {row["tag_id"]: _shape_printed(row) for row in rows}
+        self._call(
+            "POST",
+            PRINTED_TAGS,
+            {"on_conflict": "tag_id"},
+            printed_rows(wanted, known, now, actor),
+            prefer="resolution=merge-duplicates,return=minimal",
+        )
+
+    def forget_printed(self, tag_id: int) -> bool:
+        rows = self._call(
+            "DELETE", PRINTED_TAGS, {"tag_id": f"eq.{tag_id}", "select": "tag_id"}, prefer="return=representation"
+        )
+        return bool(rows)
 
     # --- meta -----------------------------------------------------------------
 

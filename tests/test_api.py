@@ -30,6 +30,7 @@ HISTORY_KEYS = {
     "changes",
     "photos",
 }
+PRINTED_KEYS = {"tag_id", "first_printed_at", "last_printed_at", "times", "printed_by"}
 PHOTO_CACHE = "private, max-age=31536000, immutable"
 
 RED = (220, 30, 30)
@@ -282,6 +283,7 @@ def test_tag_id_out_of_range_is_422(client, tag_id):
         _upload(client, f"/api/boxes/{tag_id}/photos"),
         client.get("/api/history", params={"tag_id": tag_id}),
         client.get(f"/api/qr/{tag_id}.svg"),
+        client.delete(f"/api/labels/printed/{tag_id}"),
     ]
 
     for resp in responses:
@@ -534,6 +536,316 @@ def test_qr_holds_the_box_url(client):
 
     proxied = {"X-Forwarded-Proto": "https", "X-Forwarded-Host": "boxes.example.com"}
     assert client.get("/api/qr/249.svg", headers=proxied).content == qr.svg("https://boxes.example.com/b/249")
+
+
+# --- printed labels -----------------------------------------------------------
+
+# the order labels are handed out in: from 1 upward, and tag 0 last
+HANDED_OUT = [*range(1, 250), 0]
+
+
+def _labels(client) -> dict:
+    resp = client.get("/api/labels")
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def _print(client, tag_ids: list, **headers) -> dict:
+    resp = client.post("/api/labels/printed", json={"tag_ids": tag_ids}, headers=headers)
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def test_labels_with_nothing_printed_and_no_boxes(client):
+    assert _labels(client) == {"tag_count": 250, "printed": [], "in_use": [], "next": HANDED_OUT}
+
+
+def test_labels_on_a_new_database_start_after_the_samples(fresh_store):
+    with TestClient(main.app) as client:
+        labels = _labels(client)
+
+    assert labels["printed"] == []
+    assert labels["in_use"] == [1, 2, 3, 4, 5, 6]
+    assert labels["next"] == [*range(7, 250), 0]
+
+
+def test_record_a_print(client):
+    recorded = _print(client, [5, 3, 4])
+
+    assert set(recorded) == {"tag_count", "printed", "in_use", "next"}
+    assert [row["tag_id"] for row in recorded["printed"]] == [3, 4, 5]
+    assert all(set(row) == PRINTED_KEYS for row in recorded["printed"])
+    for row in recorded["printed"]:
+        assert row["times"] == 1
+        assert row["printed_by"] == ""
+        assert row["first_printed_at"] == row["last_printed_at"]
+        assert datetime.fromisoformat(row["first_printed_at"]).utcoffset() == timedelta(0)
+    assert recorded["in_use"] == []
+    assert recorded["next"] == [1, 2, *range(6, 250), 0]
+    # what the write answered is what a read answers
+    assert _labels(client) == recorded
+
+
+def test_a_reprint_counts_one_more_and_keeps_the_first_time(client):
+    first = {row["tag_id"]: row for row in _print(client, [3, 4])["printed"]}
+
+    again = {row["tag_id"]: row for row in _print(client, [4, 5])["printed"]}
+
+    assert again[3] == first[3]
+    assert again[4]["times"] == 2
+    assert again[4]["first_printed_at"] == first[4]["first_printed_at"]
+    assert again[4]["last_printed_at"] > first[4]["last_printed_at"]
+    assert again[5]["times"] == 1
+    assert again[5]["first_printed_at"] == again[5]["last_printed_at"] == again[4]["last_printed_at"]
+
+
+def test_a_tag_repeated_in_one_print_counts_once(client):
+    printed = _print(client, [7, 7, 8, 7])["printed"]
+    assert [(row["tag_id"], row["times"]) for row in printed] == [(7, 1), (8, 1)]
+
+    printed = _print(client, [8, 8])["printed"]
+    assert [(row["tag_id"], row["times"]) for row in printed] == [(7, 1), (8, 2)]
+
+
+def test_who_printed_is_the_remote_user_of_the_latest_print(client):
+    printed = _print(client, [3, 4], **{"Remote-User": " alice "})["printed"]
+    assert [row["printed_by"] for row in printed] == ["alice", "alice"]
+
+    printed = _print(client, [4], **{"Remote-User": "bob"})["printed"]
+    assert [row["printed_by"] for row in printed] == ["alice", "bob"]
+
+    printed = _print(client, [3])["printed"]
+    assert [row["printed_by"] for row in printed] == ["", "bob"]
+
+
+def test_forget_a_print(client):
+    stays = _print(client, [3, 4])["printed"][0]
+
+    resp = client.delete("/api/labels/printed/4")
+    assert resp.status_code == 204
+    assert resp.content == b""
+
+    labels = _labels(client)
+    assert labels["printed"] == [stays]
+    assert labels["next"] == [1, 2, *range(4, 250), 0]
+
+    again = client.delete("/api/labels/printed/4")
+    assert again.status_code == 404
+    assert isinstance(again.json()["detail"], str)
+    assert _labels(client) == labels
+
+
+def test_forget_a_print_that_never_was_is_404(client):
+    client.put("/api/boxes/7", json={"name": "Camping"})
+
+    # in use is not printed
+    for tag_id in (0, 7, 249):
+        assert client.delete(f"/api/labels/printed/{tag_id}").status_code == 404
+
+
+def test_a_forgotten_tag_is_printed_again_as_new(client):
+    _print(client, [4])
+    _print(client, [4])
+    client.delete("/api/labels/printed/4")
+
+    (row,) = _print(client, [4], **{"Remote-User": "alice"})["printed"]
+
+    assert (row["times"], row["printed_by"]) == (1, "alice")
+    assert row["first_printed_at"] == row["last_printed_at"]
+
+
+def test_next_leaves_out_what_is_printed_and_what_is_in_use(client):
+    for tag_id in (2, 9, 1):
+        client.put(f"/api/boxes/{tag_id}", json={})
+    client.post("/api/boxes/4/items", json={"name": "Tent"})
+    _print(client, [3, 9, 11])
+
+    labels = _labels(client)
+
+    assert labels["in_use"] == [1, 2, 4, 9]
+    # printed and in use at once is both
+    assert [row["tag_id"] for row in labels["printed"]] == [3, 9, 11]
+    assert labels["next"] == [5, 6, 7, 8, 10, *range(12, 250), 0]
+
+
+def test_next_goes_from_1_upward_with_tag_0_last(client):
+    assert _labels(client)["next"][:3] == [1, 2, 3]
+    assert _labels(client)["next"][-2:] == [249, 0]
+
+    _print(client, [1, 249])
+    assert _labels(client)["next"] == [*range(2, 249), 0]
+
+    _print(client, [0])
+    assert _labels(client)["next"] == [*range(2, 249)]
+
+    client.delete("/api/labels/printed/0")
+    client.put("/api/boxes/0", json={})
+    labels = _labels(client)
+    assert labels["in_use"] == [0]
+    assert labels["next"] == [*range(2, 249)]
+
+
+def test_every_label_can_be_printed_in_one_go(client):
+    labels = _print(client, list(range(250)))
+
+    assert [row["tag_id"] for row in labels["printed"]] == list(range(250))
+    assert labels["next"] == []
+
+
+def test_a_deleted_box_frees_its_tag_but_a_printed_label_stays_printed(client):
+    client.put("/api/boxes/3", json={})
+    client.put("/api/boxes/4", json={})
+    printed = _print(client, [4])["printed"]
+
+    client.delete("/api/boxes/3")
+    client.delete("/api/boxes/4")
+
+    labels = _labels(client)
+    assert labels["in_use"] == []
+    assert labels["printed"] == printed
+    assert labels["next"] == [1, 2, 3, *range(5, 250), 0]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        None,
+        {},
+        {"tag_ids": None},
+        {"tag_ids": []},
+        {"tag_ids": 3},
+        {"tag_ids": "3"},
+        {"tag_ids": {"3": 1}},
+        {"tag_ids": list(range(250)) + [0]},
+        {"tag_ids": [3] * 251},
+        {"tag_ids": [250]},
+        {"tag_ids": [3, 9999]},
+        {"tag_ids": [-1]},
+        {"tag_ids": [3, -9001]},
+        {"tag_ids": ["abc"]},
+        {"tag_ids": [3, 1.5]},
+        {"tag_ids": [3, None]},
+        {"tag_ids": [[3]]},
+        {"tag_ids": [{"tag_id": 3}]},
+    ],
+)
+def test_record_a_print_validation(client, body):
+    resp = client.post("/api/labels/printed", json=body)
+
+    assert resp.status_code == 422
+    assert isinstance(resp.json()["detail"], str)
+    # one bad id and none of them is recorded
+    assert _labels(client)["printed"] == []
+
+
+def test_negative_tags_are_never_returned(client, store):
+    store.record_printed([-9001, 5, -9002], "tester")
+    store.upsert_box(-9002, {"name": "Test"}, "tester")
+    store.upsert_box(-9003, {"name": "Test"}, "tester")
+    client.put("/api/boxes/6", json={})
+
+    labels = _labels(client)
+
+    assert [row["tag_id"] for row in labels["printed"]] == [5]
+    assert labels["in_use"] == [6]
+    assert labels["next"] == [1, 2, 3, 4, *range(7, 250), 0]
+    # nor by the write, which answers with the same shape
+    assert _print(client, [4])["printed"] == _labels(client)["printed"]
+    assert [row["tag_id"] for row in _labels(client)["printed"]] == [4, 5]
+    assert client.post("/api/labels/printed", json={"tag_ids": [-9001]}).status_code == 422
+    assert client.delete("/api/labels/printed/-9001").status_code == 422
+    # they are still there, for the test that wrote them to remove
+    assert [(row["tag_id"], row["times"]) for row in store.list_printed()] == [(-9002, 1), (-9001, 1), (4, 1), (5, 1)]
+    assert store.list_tag_ids() == [-9003, -9002, 6]
+
+
+def test_cross_origin_label_writes_are_403(client):
+    client.put("/api/boxes/7", json={})
+    before = _print(client, [3])
+    evil = {"Origin": "https://evil.example.com"}
+
+    responses = [
+        client.post("/api/labels/printed", json={"tag_ids": [3, 4]}, headers=evil),
+        client.delete("/api/labels/printed/3", headers=evil),
+    ]
+
+    for resp in responses:
+        assert resp.status_code == 403, resp.request.method
+        assert resp.json() == {"detail": "cross-origin request rejected"}
+    assert _labels(client) == before
+    assert client.get("/api/labels", headers=evil).status_code == 200
+
+
+def test_same_origin_label_writes_are_allowed(client):
+    same = {"Origin": "http://testserver"}
+    proxied = {"X-Forwarded-Host": "boxes.example.com", "Origin": "https://boxes.example.com"}
+
+    assert client.post("/api/labels/printed", json={"tag_ids": [3]}, headers=same).status_code == 200
+    assert client.post("/api/labels/printed", json={"tag_ids": [3]}, headers=proxied).status_code == 200
+    assert client.delete("/api/labels/printed/3", headers=same).status_code == 204
+    assert _labels(client)["printed"] == []
+
+
+def test_printing_is_not_part_of_history_and_touches_no_box(client):
+    box = client.put("/api/boxes/7", json={"name": "Camping"}, headers={"Remote-User": "alice"}).json()
+    before = _history(client)
+
+    _print(client, [7, 8], **{"Remote-User": "bob"})
+    client.delete("/api/labels/printed/7")
+
+    assert _history(client) == before
+    assert client.get("/api/boxes/7").json() == box
+    assert client.get("/api/boxes/8").status_code == 404
+
+
+class ReadsNoBoxes(SqliteStore):
+    """Fails on every read that loads what is in a box."""
+
+    def list_boxes(self):
+        raise StoreError(500, "the labels read every box")
+
+    def get_box(self, tag_id):
+        raise StoreError(500, "the labels read a box")
+
+
+def test_labels_learn_which_tags_are_in_use_without_reading_the_boxes(tmp_path):
+    store = ReadsNoBoxes(tmp_path / "scannage.db")
+    store.apply_schema()
+    store.set_meta(samples.META_KEY, "set by the test")
+    store.upsert_box(7, {"name": "Camping"}, "")
+    store.add_photo(store.add_item(7, "Tent", 1, "")["box_id"], None, photos.process(_image()), "")
+    stores.set_store(store)
+    try:
+        with TestClient(main.app) as client:
+            labels = _print(client, [8])
+            assert client.delete("/api/labels/printed/8").status_code == 204
+            assert _labels(client)["in_use"] == [7]
+    finally:
+        stores.set_store(None)
+
+    assert labels["in_use"] == [7]
+    assert [row["tag_id"] for row in labels["printed"]] == [8]
+    assert labels["next"] == [1, 2, 3, 4, 5, 6, *range(9, 250), 0]
+
+
+class PrintedFails(SqliteStore):
+    def list_printed(self):
+        raise StoreError(500, "disk on fire")
+
+
+def test_a_store_failure_on_the_labels_is_502(tmp_path):
+    store = PrintedFails(tmp_path / "scannage.db")
+    store.apply_schema()
+    store.set_meta(samples.META_KEY, "set by the test")
+    stores.set_store(store)
+    try:
+        with TestClient(main.app) as client:
+            resp = client.get("/api/labels")
+    finally:
+        stores.set_store(None)
+
+    assert resp.status_code == 502
+    assert resp.json() == {"detail": "store unavailable"}
 
 
 # --- pages --------------------------------------------------------------------

@@ -12,6 +12,9 @@ erases each one by its id. No test image stays in the database.
 History is kept for good, so the entries these tests write stay behind.
 They carry the same negative tag ids, which the API never returns. Every
 assertion here looks only at the entries of the box its own test made.
+
+Printed labels are recorded on negative tag ids as well, and cleanup forgets
+each one of them by its id. No test row stays in printed_tags.
 """
 
 import io
@@ -22,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from PIL import Image
 
-from app import bootstrap, history, photos
+from app import bootstrap, config, history, main, photos, stores
 from app.stores import postgrest
 from app.stores.base import StoreError
 from app.stores.postgrest import PostgrestStore
@@ -31,12 +34,15 @@ TAG_A = -9001
 TAG_B = -9002
 TAG_C = -9003
 TEST_TAGS = (TAG_A, TAG_B, TAG_C)
+# A whole sheet of labels, every one of them on a tag no label can have.
+SHEET_TAGS = tuple(range(-9500, -9500 + config.TAG_COUNT))
 
 BOX_KEYS = {"id", "tag_id", "name", "location", "notes", "created_at", "updated_at", "updated_by", "items", "photos"}
 ITEM_KEYS = {"id", "box_id", "name", "qty", "created_at", "updated_at", "photos"}
 PHOTO_KEYS = {"id", "box_id", "item_id", "width", "height", "size", "created_at", "created_by"}
 KEPT_PHOTO_KEYS = PHOTO_KEYS | {"tag_id", "removed_at"}
 HISTORY_KEYS = {"id", "at", "actor", "action", "tag_id", "box_id", "box_name", "item_id", "item_name", "changes"}
+PRINTED_KEYS = {"tag_id", "first_printed_at", "last_printed_at", "times", "printed_by"}
 
 # PostgREST reloads its schema cache a moment after a new table is created.
 RELOAD_SECONDS = 20
@@ -65,11 +71,23 @@ def _remove_test_boxes(store: PostgrestStore) -> None:
     assert left == [], f"kept test photos were left behind in the database: {left}"
 
 
-def _wait_until_served(store: PostgrestStore, table: str) -> None:
+def _test_prints(store: PostgrestStore, tag_ids: tuple[int, ...] = TEST_TAGS) -> dict[int, dict]:
+    """The printed labels that belong to the tests, by tag."""
+    return {row["tag_id"]: row for row in store.list_printed() if row["tag_id"] in tag_ids}
+
+
+def _forget_test_prints(store: PostgrestStore, tag_ids: tuple[int, ...] = TEST_TAGS) -> None:
+    for tag_id in _test_prints(store, tag_ids):
+        assert store.forget_printed(tag_id) is True, f"the print of test tag {tag_id} could not be forgotten"
+    left = sorted(_test_prints(store, tag_ids))
+    assert left == [], f"printed test labels were left behind in the database: {left}"
+
+
+def _wait_until_served(store: PostgrestStore, table: str, column: str = "id") -> None:
     deadline = time.monotonic() + RELOAD_SECONDS
     while True:
         try:
-            store._call("GET", table, {"select": "id", "limit": "1"})
+            store._call("GET", table, {"select": column, "limit": "1"})
             return
         except StoreError as exc:
             assert time.monotonic() < deadline, f"postgrest does not serve {table}, red, not skipped: {exc.detail}"
@@ -137,6 +155,7 @@ def live_store():
     assert reachable, f"postgrest unreachable, red, not skipped: {detail}"
     for table in ("history", "photos", "kept_photos"):
         _wait_until_served(store, table)
+    _wait_until_served(store, "printed_tags", "tag_id")
     return store
 
 
@@ -144,12 +163,27 @@ def live_store():
 def store(live_store):
     # leftovers from an interrupted run would break the assertions below
     _remove_test_boxes(live_store)
+    _forget_test_prints(live_store)
     try:
         yield live_store
     finally:
-        _remove_test_boxes(live_store)
-        for tag_id in TEST_TAGS:
-            assert live_store.get_box(tag_id) is None, f"test box {tag_id} was left behind"
+        try:
+            _remove_test_boxes(live_store)
+            for tag_id in TEST_TAGS:
+                assert live_store.get_box(tag_id) is None, f"test box {tag_id} was left behind"
+        finally:
+            # whatever went wrong with the boxes, no printed test label stays
+            _forget_test_prints(live_store)
+
+
+@pytest.fixture()
+def sheet(store):
+    """The store, for a test that prints a whole sheet of test labels."""
+    _forget_test_prints(store, SHEET_TAGS)
+    try:
+        yield store
+    finally:
+        _forget_test_prints(store, SHEET_TAGS)
 
 
 def test_box_round_trip(store):
@@ -768,3 +802,167 @@ def test_erasing_is_recorded_and_the_photo_is_gone_from_every_entry(store, clock
     assert deleted["photos"] == [_kept(on_box)]
     assert [photo["id"] for entry in earlier for photo in entry["photos"]] == [on_box["id"]]
     assert store.get_photo_data(on_box["id"]) is not None
+
+
+# --- printed labels -----------------------------------------------------------
+
+
+def test_list_tag_ids_is_ordered_and_holds_the_boxes(store):
+    store.upsert_box(TAG_A, {"name": "A"}, "")
+    item = store.add_item(TAG_C, "With a photo", 1, "")
+    store.add_photo(item["box_id"], item["id"], _image(), "")
+
+    tag_ids = store.list_tag_ids()
+
+    assert tag_ids == sorted(tag_ids)
+    assert all(isinstance(tag_id, int) for tag_id in tag_ids)
+    assert [tag_id for tag_id in tag_ids if tag_id in TEST_TAGS] == [TAG_C, TAG_A]
+    assert tag_ids == [box["tag_id"] for box in store.list_boxes()]
+
+    store.delete_box(TAG_C)
+    assert [tag_id for tag_id in store.list_tag_ids() if tag_id in TEST_TAGS] == [TAG_A]
+
+
+def test_printed_round_trip(store):
+    assert _test_prints(store) == {}
+
+    assert store.record_printed([TAG_A, TAG_B], "tester") is None
+
+    listed = store.list_printed()
+    assert [row["tag_id"] for row in listed] == sorted(row["tag_id"] for row in listed)
+    ours = [row for row in listed if row["tag_id"] in TEST_TAGS]
+    # negative ids sort first, and -9002 sorts before -9001
+    assert [row["tag_id"] for row in ours] == [TAG_B, TAG_A]
+    assert all(set(row) == PRINTED_KEYS for row in ours)
+    stamp = ours[0]["first_printed_at"]
+    assert stamp.endswith("+00:00")
+    assert ours == [
+        {"tag_id": tag_id, "first_printed_at": stamp, "last_printed_at": stamp, "times": 1, "printed_by": "tester"}
+        for tag_id in (TAG_B, TAG_A)
+    ]
+    apart = datetime.fromisoformat(stamp) - datetime.now(timezone.utc)
+    assert abs(apart) < timedelta(minutes=10), "the time of a print is written by the app, as UTC"
+
+    assert store.forget_printed(TAG_A) is True
+    assert store.forget_printed(TAG_A) is False
+    assert sorted(_test_prints(store)) == [TAG_B]
+
+
+def test_a_reprint_counts_one_more_and_keeps_the_first_time(store):
+    store.record_printed([TAG_A, TAG_B], "tester")
+    first = _test_prints(store)
+
+    # one that was printed and one that was not, in the same request
+    store.record_printed([TAG_B, TAG_C], "other")
+    store.record_printed([TAG_B], "")
+
+    printed = _test_prints(store)
+    assert sorted(printed) == [TAG_C, TAG_B, TAG_A]
+    assert printed[TAG_A] == first[TAG_A], "a tag that was not in the print was written to"
+    assert printed[TAG_B]["times"] == 3
+    assert printed[TAG_B]["first_printed_at"] == first[TAG_B]["first_printed_at"]
+    assert printed[TAG_B]["last_printed_at"] > printed[TAG_C]["last_printed_at"] > first[TAG_B]["last_printed_at"]
+    assert printed[TAG_B]["printed_by"] == ""
+    assert (printed[TAG_C]["times"], printed[TAG_C]["printed_by"]) == (1, "other")
+    assert printed[TAG_C]["first_printed_at"] == printed[TAG_C]["last_printed_at"]
+
+
+def test_a_tag_repeated_in_one_print_counts_once(store):
+    # sent twice in one bulk upsert, the database would refuse the whole request
+    store.record_printed([TAG_A, TAG_A, TAG_B, TAG_A], "tester")
+    assert {tag_id: row["times"] for tag_id, row in _test_prints(store).items()} == {TAG_A: 1, TAG_B: 1}
+
+    store.record_printed([TAG_B, TAG_A, TAG_B], "tester")
+    assert {tag_id: row["times"] for tag_id, row in _test_prints(store).items()} == {TAG_A: 2, TAG_B: 2}
+
+
+def test_a_print_of_nothing_records_nothing(store):
+    before = store.list_printed()
+
+    store.record_printed([], "tester")
+
+    assert store.list_printed() == before
+
+
+def test_a_forgotten_tag_starts_over(store):
+    store.record_printed([TAG_A], "tester")
+    store.record_printed([TAG_A], "tester")
+    before = _test_prints(store)[TAG_A]
+    assert before["times"] == 2
+    assert store.forget_printed(TAG_A) is True
+
+    store.record_printed([TAG_A], "other")
+
+    again = _test_prints(store)[TAG_A]
+    assert (again["times"], again["printed_by"]) == (1, "other")
+    assert again["first_printed_at"] == again["last_printed_at"]
+    assert again["first_printed_at"] > before["last_printed_at"]
+
+
+def test_a_printed_label_needs_no_box_and_outlives_one(store):
+    store.upsert_box(TAG_A, {"name": "Printed"}, "tester")
+    store.record_printed([TAG_A, TAG_B], "tester")
+    printed = _test_prints(store)
+
+    assert store.delete_box(TAG_A) is True
+
+    assert _test_prints(store) == printed
+    assert store.get_box(TAG_B) is None
+
+
+def test_printing_writes_no_history_and_touches_no_box(store, clock):
+    box = history.put_box(store, TAG_A, {"name": "Untouched"}, "tester")
+    before = _entries(store, box)
+
+    store.record_printed([TAG_A], "other")
+    store.forget_printed(TAG_A)
+
+    assert store.get_box(TAG_A) == box
+    assert _entries(store, box) == before
+
+
+def test_a_print_counts_at_least_once(store):
+    stamp = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    row = {"tag_id": TAG_A, "first_printed_at": stamp, "last_printed_at": stamp, "times": 0, "printed_by": "tester"}
+
+    with pytest.raises(StoreError) as refused:
+        store._call("POST", "printed_tags", None, row, prefer="return=minimal")
+
+    assert 400 <= refused.value.status_code < 500, f"expected the check on times: {refused.value.detail}"
+    assert _test_prints(store) == {}
+
+
+def test_a_whole_sheet_is_printed_in_one_go(sheet):
+    sheet.record_printed(list(SHEET_TAGS[:100]), "tester")
+
+    sheet.record_printed(list(SHEET_TAGS), "other")
+
+    printed = _test_prints(sheet, SHEET_TAGS)
+    assert sorted(printed) == list(SHEET_TAGS), "the ids of a whole sheet must fit in one request"
+    assert [printed[tag_id]["times"] for tag_id in SHEET_TAGS] == [2] * 100 + [1] * (len(SHEET_TAGS) - 100)
+    assert {row["printed_by"] for row in printed.values()} == {"other"}
+    assert len({row["last_printed_at"] for row in printed.values()}) == 1
+    assert all(row["first_printed_at"] < row["last_printed_at"] for row in list(printed.values())[:100])
+
+
+def test_the_api_never_returns_the_test_tags(store):
+    store.upsert_box(TAG_A, {"name": "Hidden"}, "tester")
+    store.record_printed([TAG_A, TAG_B], "tester")
+    stores.set_store(store)
+    try:
+        # what GET /api/labels answers with, read from the live store
+        labels = main._labels()
+    finally:
+        stores.set_store(None)
+
+    assert set(labels) == {"tag_count", "printed", "in_use", "next"}
+    assert labels["tag_count"] == config.TAG_COUNT
+    returned = [row["tag_id"] for row in labels["printed"]] + labels["in_use"] + labels["next"]
+    assert [tag_id for tag_id in returned if tag_id < 0] == [], "a negative tag id came back from the API"
+    assert all(set(row) == PRINTED_KEYS for row in labels["printed"])
+    assert [row["tag_id"] for row in labels["printed"]] == sorted(row["tag_id"] for row in labels["printed"])
+    assert labels["in_use"] == sorted(labels["in_use"])
+    taken = {row["tag_id"] for row in labels["printed"]} | set(labels["in_use"])
+    assert labels["next"] == [tag_id for tag_id in [*range(1, config.TAG_COUNT), 0] if tag_id not in taken]
+    # and the test rows are there all the same, for cleanup to remove
+    assert sorted(_test_prints(store)) == [TAG_B, TAG_A]

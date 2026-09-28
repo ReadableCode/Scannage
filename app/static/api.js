@@ -136,6 +136,16 @@
       return request('GET', '/api/history?' + q.join('&'));
     },
 
+    // which tags have had a label printed, which are in use, and which come next
+    labels: function () { return request('GET', '/api/labels'); },
+    recordPrinted: function (tagIds) {
+      return request('POST', '/api/labels/printed', { tag_ids: tagIds });
+    },
+    // a tag that is already forgotten counts as forgotten
+    forgetPrinted: function (tagId) {
+      return request('DELETE', '/api/labels/printed/' + tagId).catch(missingIsNull);
+    },
+
     qrUrl: function (tagId) { return '/api/qr/' + tagId + '.svg'; },
     photoUrl: function (photoId) { return '/api/photos/' + encodeURIComponent(photoId); },
     thumbUrl: function (photoId) { return '/api/photos/' + encodeURIComponent(photoId) + '/thumb'; }

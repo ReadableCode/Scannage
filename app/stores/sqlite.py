@@ -19,12 +19,14 @@ from .base import (
     ITEM_FIELDS,
     KEPT_PHOTO_KEYS,
     PHOTO_KEYS,
+    PRINTED_KEYS,
     StoreError,
     attach_photos,
     chunks,
     clean_uuid,
     clean_uuids,
     new_id,
+    once_each,
     pick,
     utc_now,
 )
@@ -111,6 +113,16 @@ CREATE TABLE IF NOT EXISTS kept_photos (
     tag_id     INTEGER,
     removed_at TEXT NOT NULL
 );
+
+-- One row per tag that has had a label printed. tag_id references nothing: a
+-- label is printed before any box exists.
+CREATE TABLE IF NOT EXISTS printed_tags (
+    tag_id           INTEGER PRIMARY KEY,
+    first_printed_at TEXT NOT NULL,
+    last_printed_at  TEXT NOT NULL,
+    times            INTEGER NOT NULL DEFAULT 1 CHECK (times >= 1),
+    printed_by       TEXT NOT NULL DEFAULT ''
+);
 """
 
 # SQLite has no ADD COLUMN IF NOT EXISTS, so apply_schema looks before it adds.
@@ -156,6 +168,16 @@ KEPT_PHOTOS = "kept_photos"
 # SQLite takes a limited number of values in one statement.
 ID_CHUNK = 500
 HISTORY_COLUMNS = ", ".join(HISTORY_KEYS)
+PRINTED_COLUMNS = ", ".join(PRINTED_KEYS)
+
+# A tag printed before keeps its first time and counts one more.
+RECORD_PRINTED = f"""
+INSERT INTO printed_tags ({PRINTED_COLUMNS}) VALUES (?, ?, ?, 1, ?)
+ON CONFLICT (tag_id) DO UPDATE SET
+    last_printed_at = excluded.last_printed_at,
+    times = times + 1,
+    printed_by = excluded.printed_by
+"""
 
 
 class SqliteStore:
@@ -243,6 +265,11 @@ class SqliteStore:
                 by_box.setdefault(item["box_id"], []).append(item)
             photos = self._photos(conn)
         return attach_photos([{**box, "items": by_box.get(box["id"], [])} for box in boxes], photos)
+
+    def list_tag_ids(self) -> list[int]:
+        # which tags have a box, without reading what is in them
+        with self._tx() as conn:
+            return [row["tag_id"] for row in conn.execute("SELECT tag_id FROM boxes ORDER BY tag_id")]
 
     def get_box(self, tag_id: int) -> dict | None:
         with self._tx() as conn:
@@ -464,6 +491,21 @@ class SqliteStore:
                 f"SELECT {HISTORY_COLUMNS} FROM history {where} ORDER BY at DESC, id DESC LIMIT ?", (*args, limit)
             )
             return [self._entry(row) for row in rows]
+
+    # --- printed labels -------------------------------------------------------
+
+    def list_printed(self) -> list[dict]:
+        with self._tx() as conn:
+            return [dict(row) for row in conn.execute(f"SELECT {PRINTED_COLUMNS} FROM printed_tags ORDER BY tag_id")]
+
+    def record_printed(self, tag_ids: list[int], actor: str) -> None:
+        now = utc_now()
+        with self._tx(write=True) as conn:
+            conn.executemany(RECORD_PRINTED, [(tag_id, now, now, actor) for tag_id in once_each(tag_ids)])
+
+    def forget_printed(self, tag_id: int) -> bool:
+        with self._tx(write=True) as conn:
+            return conn.execute("DELETE FROM printed_tags WHERE tag_id = ?", (tag_id,)).rowcount > 0
 
     # --- meta -----------------------------------------------------------------
 

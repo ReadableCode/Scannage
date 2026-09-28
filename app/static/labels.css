@@ -12,6 +12,88 @@ body.labels #tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; 
 .controls input { font-variant-numeric: tabular-nums; }
 .controls .btn { flex: none; padding: .7rem 1.4rem; }
 
+.steps { margin: 0; padding-left: 1.7em; font-size: .85rem; color: var(--ink-2); }
+.steps li { margin: .3rem 0; padding-left: .2em; }
+.steps li::marker { color: var(--green-bright); font-weight: 700; }
+
+/* the two ways to choose, built like the tab bar */
+.modes {
+  display: flex;
+  margin-bottom: 12px;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.modes button {
+  flex: 1;
+  min-height: 56px;
+  padding: 6px 10px;
+  background: none;
+  border: 0;
+  color: var(--ink-2);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.modes button + button { border-left: 1px solid var(--border); }
+.modes button.on { background: var(--surface-2); color: var(--ink); font-weight: 700; }
+.modes button.on::before { content: "\276F"; margin-right: .5em; color: var(--green-bright); }
+.modes .sub { display: block; font-size: .74rem; font-weight: 500; color: var(--muted); }
+.modes button:focus-visible { outline: 1px solid var(--green-bright); outline-offset: -4px; }
+
+.done { display: flex; flex-wrap: wrap; align-items: center; gap: 0 14px; color: var(--ink-2); }
+.done span { font-variant-numeric: tabular-nums; }
+#printPlain { display: block; }
+
+/* ten to a row, so a row is a run of ten numbers */
+.cells { display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px; margin-top: .7rem; }
+.cell {
+  position: relative;
+  min-height: 32px;
+  padding: 0 0 3px;
+  background: none;
+  border: 1px solid var(--axis);
+  border-radius: var(--radius);
+  font-size: .68rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+/* printed is a fill and in use is a bar, so the four states differ without colour */
+.cell.printed { background: var(--heat-2); border-color: var(--heat-3); color: var(--ink); font-weight: 700; }
+.cell.used::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  right: 5px;
+  bottom: 4px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--amber-bright);
+}
+.cell:focus-visible { outline: 1px solid var(--green-bright); outline-offset: 2px; }
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: .78rem;
+  color: var(--ink-2);
+}
+.legend li { display: flex; align-items: center; gap: 6px; }
+.legend .cell { width: 26px; min-height: 22px; cursor: default; }
+
+@media (max-width: 560px) {
+  .controls .btn { flex: 1 0 100%; }
+}
+@media (min-width: 700px) {
+  .cells { grid-template-columns: repeat(20, 1fr); }
+}
+
 /* a sheet is wider than a phone, so the preview scrolls sideways */
 .sheets { overflow-x: auto; padding: 0 14px 8px; }
 
@@ -38,17 +120,22 @@ body.labels #tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; 
 }
 .label .tag { width: 2.35in; height: 2.35in; flex: none; }
 .label .tag svg { display: block; width: 100%; height: 100%; }
-.label .side { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; }
+/* the line under the number takes room above the code. the same room under the hint keeps the
+   code where it was before that line existed */
+.label .side { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; padding-bottom: 0.17in; }
 .label .kicker { font-size: 11pt; font-weight: 600; letter-spacing: 0.12em; }
-.label .number { font-size: 30pt; font-weight: 700; line-height: 1; margin-bottom: 0.08in; font-variant-numeric: tabular-nums; }
+.label .number { font-size: 30pt; font-weight: 700; line-height: 1; margin-bottom: 0.02in; font-variant-numeric: tabular-nums; }
+.label .of { height: 0.17in; margin-bottom: 0.06in; font-size: 10pt; line-height: 0.17in; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .label .qr { display: block; width: 0.95in; height: 0.95in; margin-left: -0.06in; }
 .label .hint { margin: 0.03in 0 0; font-size: 6.5pt; color: #444; }
 
 .sheet.large { grid-template-columns: 1fr; }
 .large .label { height: 5in; padding: 0.3in; gap: 0.3in; }
 .large .label .tag { width: 4.4in; height: 4.4in; }
+.large .label .side { padding-bottom: 0.3in; }
 .large .label .kicker { font-size: 18pt; }
-.large .label .number { font-size: 60pt; margin-bottom: 0.15in; }
+.large .label .number { font-size: 60pt; margin-bottom: 0.03in; }
+.large .label .of { height: 0.3in; margin-bottom: 0.12in; font-size: 18pt; line-height: 0.3in; }
 .large .label .qr { width: 1.5in; height: 1.5in; margin-left: -0.09in; }
 .large .label .hint { font-size: 9pt; }
 

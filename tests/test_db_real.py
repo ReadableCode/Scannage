@@ -11,7 +11,7 @@ import pytest
 
 from app import bootstrap, config
 
-TABLES = ("boxes", "items", "app_meta", "history", "photos", "kept_photos")
+TABLES = ("boxes", "items", "app_meta", "history", "photos", "kept_photos", "printed_tags")
 ROLE = "scannage_user"
 EVERYTHING = ("SELECT", "INSERT", "UPDATE", "DELETE")
 # A kept photo is written by the trigger, read, and erased on purpose. It is never changed.
@@ -72,6 +72,24 @@ def _triggers(cur, table: str) -> dict[str, tuple[str, str, str, str]]:
         (table,),
     )
     return {name: (timing, event, each, statement) for name, timing, event, each, statement in cur.fetchall()}
+
+
+def _defaults(cur, table: str) -> dict[str, str | None]:
+    cur.execute(
+        """SELECT column_name, column_default FROM information_schema.columns
+           WHERE table_schema = 'scannage' AND table_name = %s""",
+        (table,),
+    )
+    return dict(cur.fetchall())
+
+
+def _checks(cur, table: str) -> list[str]:
+    cur.execute(
+        """SELECT pg_get_constraintdef(oid) FROM pg_constraint
+           WHERE conrelid = %s::regclass AND contype = 'c'""",
+        (f"scannage.{table}",),
+    )
+    return [row[0] for row in cur.fetchall()]
 
 
 def _indexes(cur, table: str) -> dict[str, str]:
@@ -243,6 +261,44 @@ def test_every_photo_carries_the_tag_of_its_box(cur):
     assert cur.fetchone() == (0,), "photos whose tag_id is missing or is not the tag of their box"
 
 
+def test_printed_tag_columns(cur):
+    assert _columns(cur, "printed_tags") == {
+        "tag_id": "integer",
+        "first_printed_at": "timestamp with time zone",
+        "last_printed_at": "timestamp with time zone",
+        "times": "integer",
+        "printed_by": "text",
+    }
+    assert _nullable(cur, "printed_tags") == []
+    assert "(tag_id)" in _indexes(cur, "printed_tags")["printed_tags_pkey"]
+
+
+def test_printed_tag_defaults(cur):
+    defaults = _defaults(cur, "printed_tags")
+
+    assert defaults["tag_id"] is None, "a tag id is never made up by the database"
+    assert defaults["times"] == "1"
+    assert defaults["printed_by"] == "''::text"
+    assert defaults["first_printed_at"] == defaults["last_printed_at"] == "now()"
+
+
+def test_a_printed_tag_counts_at_least_one_print(cur):
+    checks = _checks(cur, "printed_tags")
+
+    assert len(checks) == 1
+    assert "times >= 1" in checks[0]
+
+
+def test_printed_tags_reference_nothing_so_a_label_needs_no_box(cur):
+    assert _foreign_keys(cur, "printed_tags") == {}
+    cur.execute(
+        """SELECT conname FROM pg_constraint
+           WHERE confrelid = 'scannage.printed_tags'::regclass AND contype = 'f'"""
+    )
+    assert cur.fetchall() == [], "something references printed_tags"
+    assert _triggers(cur, "printed_tags") == {}
+
+
 def test_bytea_is_sent_as_hex(cur):
     # the store reads photos through JSON and expects the hex form
     cur.execute("SELECT current_setting('bytea_output')")
@@ -250,7 +306,7 @@ def test_bytea_is_sent_as_hex(cur):
 
 
 def test_schema_version_is_stamped(cur):
-    assert bootstrap.SCHEMA_VERSION == 3
+    assert bootstrap.SCHEMA_VERSION == 4
     cur.execute("SELECT version FROM scannage.deploy_meta WHERE id = 1")
     assert cur.fetchone() == (bootstrap.SCHEMA_VERSION,)
 

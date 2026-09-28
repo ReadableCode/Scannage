@@ -21,6 +21,7 @@ ITEM_KEYS = {"id", "box_id", "name", "qty", "created_at", "updated_at", "photos"
 PHOTO_KEYS = {"id", "box_id", "item_id", "width", "height", "size", "created_at", "created_by"}
 KEPT_PHOTO_KEYS = PHOTO_KEYS | {"tag_id", "removed_at"}
 HISTORY_KEYS = {"id", "at", "actor", "action", "tag_id", "box_id", "box_name", "item_id", "item_name", "changes"}
+PRINTED_KEYS = {"tag_id", "first_printed_at", "last_printed_at", "times", "printed_by"}
 
 SAMPLE_TAGS = [1, 2, 3, 4, 5, 6]
 SAMPLE_NAMES = ["Camping", "Christmas", "Paint supplies", "Power tools", "Car care", "Cables"]
@@ -99,6 +100,46 @@ CREATE INDEX IF NOT EXISTS photos_box_id_idx ON photos (box_id);
 CREATE INDEX IF NOT EXISTS photos_item_id_idx ON photos (item_id);
 """
 )
+
+# What version 3 added to them: photos that are kept, and the tag a photo was on.
+VERSION_3_SCHEMA = (
+    VERSION_2_SCHEMA
+    + """
+CREATE TABLE IF NOT EXISTS kept_photos (
+    id         TEXT PRIMARY KEY,
+    box_id     TEXT NOT NULL,
+    item_id    TEXT,
+    width      INTEGER NOT NULL,
+    height     INTEGER NOT NULL,
+    size       INTEGER NOT NULL,
+    data       BLOB NOT NULL,
+    thumb      BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT '',
+    tag_id     INTEGER,
+    removed_at TEXT NOT NULL
+);
+
+ALTER TABLE photos ADD COLUMN tag_id INTEGER;
+
+CREATE TRIGGER IF NOT EXISTS photos_fill_tag_id AFTER INSERT ON photos
+WHEN NEW.tag_id IS NULL
+BEGIN
+    UPDATE photos SET tag_id = (SELECT tag_id FROM boxes WHERE id = NEW.box_id) WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS photos_keep BEFORE DELETE ON photos
+BEGIN
+    INSERT INTO kept_photos (
+        id, box_id, item_id, width, height, size, data, thumb, created_at, created_by, tag_id, removed_at
+    ) VALUES (
+        OLD.id, OLD.box_id, OLD.item_id, OLD.width, OLD.height, OLD.size, OLD.data, OLD.thumb,
+        OLD.created_at, OLD.created_by, OLD.tag_id, strftime('%Y-%m-%dT%H:%M:%f000+00:00', 'now')
+    );
+END;
+"""
+)
+VERSION_3_TABLES = {"boxes", "items", "app_meta", "history", "photos", "kept_photos"}
 
 
 @pytest.fixture()
@@ -258,6 +299,21 @@ def test_list_boxes_ordered_by_tag_id_with_items(store):
 
 def test_list_boxes_empty(store):
     assert store.list_boxes() == []
+
+
+def test_list_tag_ids_is_ordered_and_holds_every_box(store):
+    assert store.list_tag_ids() == []
+
+    for tag_id in (5, -9001, 0, 249, 3):
+        store.upsert_box(tag_id, {}, "")
+    item = store.add_item(3, "Rope", 2, "")
+    store.add_photo(item["box_id"], item["id"], IMAGE, "")
+
+    assert store.list_tag_ids() == [-9001, 0, 3, 5, 249]
+    assert store.list_tag_ids() == [box["tag_id"] for box in store.list_boxes()]
+
+    store.delete_box(3)
+    assert store.list_tag_ids() == [-9001, 0, 5, 249]
 
 
 def test_delete_box(store):
@@ -899,6 +955,133 @@ def test_history_outlives_its_box(store):
     assert store.list_history(7, 50, None) == [entry]
 
 
+# --- printed labels -----------------------------------------------------------
+
+
+def _printed(store: SqliteStore) -> dict[int, dict]:
+    return {row["tag_id"]: row for row in store.list_printed()}
+
+
+def test_nothing_is_printed_to_begin_with(store):
+    assert store.list_printed() == []
+
+
+def test_record_printed(store):
+    store.record_printed([5, 1, 3], "alice")
+
+    printed = store.list_printed()
+
+    assert [row["tag_id"] for row in printed] == [1, 3, 5]
+    assert all(set(row) == PRINTED_KEYS for row in printed)
+    assert all(_is_utc_iso(row["first_printed_at"]) for row in printed)
+    # one print, one time
+    stamp = printed[0]["first_printed_at"]
+    assert printed == [
+        {"tag_id": tag_id, "first_printed_at": stamp, "last_printed_at": stamp, "times": 1, "printed_by": "alice"}
+        for tag_id in (1, 3, 5)
+    ]
+
+
+def test_a_reprint_counts_one_more_and_keeps_the_first_time(store):
+    store.record_printed([1, 2], "alice")
+    first = _printed(store)
+
+    store.record_printed([2, 3], "bob")
+    store.record_printed([2], "")
+
+    printed = _printed(store)
+    assert sorted(printed) == [1, 2, 3]
+    assert printed[1] == first[1]
+    assert printed[2]["times"] == 3
+    assert printed[2]["first_printed_at"] == first[2]["first_printed_at"]
+    assert printed[2]["last_printed_at"] > printed[3]["last_printed_at"] > first[2]["last_printed_at"]
+    # who printed it last, and nobody when the last print came without a name
+    assert printed[2]["printed_by"] == ""
+    assert (printed[3]["times"], printed[3]["printed_by"]) == (1, "bob")
+    assert printed[3]["first_printed_at"] == printed[3]["last_printed_at"]
+
+
+def test_a_tag_repeated_in_one_print_counts_once(store):
+    store.record_printed([7, 7, 8, 7], "")
+    assert [(row["tag_id"], row["times"]) for row in store.list_printed()] == [(7, 1), (8, 1)]
+
+    store.record_printed([8, 7, 8], "")
+    assert [(row["tag_id"], row["times"]) for row in store.list_printed()] == [(7, 2), (8, 2)]
+
+
+def test_a_print_of_nothing_records_nothing(store):
+    store.record_printed([], "alice")
+
+    assert store.list_printed() == []
+
+
+def test_forget_printed(store):
+    store.record_printed([1, 2, 3], "alice")
+    stays = _printed(store)
+
+    assert store.forget_printed(2) is True
+    assert store.forget_printed(2) is False
+    assert store.forget_printed(99) is False
+
+    assert _printed(store) == {1: stays[1], 3: stays[3]}
+
+
+def test_a_forgotten_tag_starts_over(store):
+    store.record_printed([7], "alice")
+    store.record_printed([7], "alice")
+    before = _printed(store)[7]
+    store.forget_printed(7)
+
+    store.record_printed([7], "bob")
+
+    again = _printed(store)[7]
+    assert (again["times"], again["printed_by"]) == (1, "bob")
+    assert again["first_printed_at"] == again["last_printed_at"]
+    assert again["first_printed_at"] > before["last_printed_at"]
+
+
+def test_printed_accepts_any_tag_id(store):
+    store.record_printed([-9001, 0, 249, 4000], "tester")
+
+    assert [row["tag_id"] for row in store.list_printed()] == [-9001, 0, 249, 4000]
+    assert store.forget_printed(-9001) is True
+    assert store.forget_printed(-9001) is False
+    assert [row["tag_id"] for row in store.list_printed()] == [0, 249, 4000]
+
+
+def test_printed_tags_reference_nothing_so_a_label_needs_no_box(store):
+    assert _rows(store, "PRAGMA foreign_key_list(printed_tags)") == []
+    store.upsert_box(7, {"name": "Camping"}, "")
+    store.record_printed([7, 8], "alice")
+    printed = store.list_printed()
+
+    store.delete_box(7)
+
+    # a label that was printed stays printed, with or without its box
+    assert store.list_printed() == printed
+    assert store.get_box(8) is None
+    assert store.list_tag_ids() == []
+
+
+def test_printing_writes_no_history_and_touches_no_box(store):
+    box = store.upsert_box(7, {"name": "Camping"}, "alice")
+
+    store.record_printed([7], "bob")
+    store.forget_printed(7)
+
+    assert store.get_box(7) == box
+    assert store.list_history(None, 50, None, include_tests=True) == []
+
+
+def test_times_below_one_is_refused_by_the_database(store):
+    insert = "INSERT INTO printed_tags (tag_id, first_printed_at, last_printed_at, times) VALUES (7, ?, ?, 0)"
+
+    with pytest.raises(sqlite3.IntegrityError):
+        _rows(store, insert, _at(1), _at(1))
+
+    assert store.list_printed() == []
+
+
 # --- sample boxes -------------------------------------------------------------
 
 
@@ -1025,8 +1208,9 @@ def test_init_db_without_a_flag_only_applies_the_schema(tmp_path):
     assert "applied" in _init_db(store.path)
     _init_db(store.path, "--force")
 
-    assert {"boxes", "items", "app_meta", "history", "photos", "kept_photos"} <= _tables(store)
+    assert {"boxes", "items", "app_meta", "history", "photos", "kept_photos", "printed_tags"} <= _tables(store)
     assert store.list_boxes() == []
+    assert store.list_printed() == []
     assert store.get_meta(samples.META_KEY) is None
 
 
@@ -1074,7 +1258,7 @@ def test_a_version_1_database_is_upgraded_in_place(tmp_path):
     store.bootstrap()
     store.bootstrap()
 
-    assert {"boxes", "items", "app_meta", "history", "photos", "kept_photos"} <= _tables(store)
+    assert _tables(store) == VERSION_3_TABLES | {"printed_tags"}
     assert store.list_boxes() == [
         {
             "id": box_id,
@@ -1170,7 +1354,7 @@ def test_a_version_2_database_with_photos_is_upgraded_in_place(tmp_path):
     store.bootstrap()
     store.bootstrap()
 
-    assert {"boxes", "items", "app_meta", "history", "photos", "kept_photos"} <= _tables(store)
+    assert _tables(store) == VERSION_3_TABLES | {"printed_tags"}
     on_box = {
         "id": on_box_id,
         "box_id": box_id,
@@ -1210,3 +1394,102 @@ def test_a_version_2_database_with_photos_is_upgraded_in_place(tmp_path):
     assert deleted["changes"]["photos"] == [[on_box_id, on_item_id], None]
     assert deleted["photos"] == [_kept(on_box), _kept(on_item)]
     assert [entry["id"] for entry in history.list_entries(store, 9, 50, None)] == [entry_id]
+
+
+def _dump(store: SqliteStore, tables: set[str]) -> dict[str, list[tuple]]:
+    """Every row of these tables, as the database holds them."""
+    return {table: _rows(store, f"SELECT * FROM {table} ORDER BY 1") for table in sorted(tables)}
+
+
+def _triggers(store: SqliteStore) -> list[tuple]:
+    return _rows(store, "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name")
+
+
+def test_a_version_3_database_is_upgraded_in_place(tmp_path):
+    path = tmp_path / "scannage.db"
+    stamp = "2026-05-01T10:00:00.000000+00:00"
+    later = "2026-05-01T10:00:01.000000+00:00"
+    box_id, item_id, on_box_id, on_item_id, removed_id, entry_id = (str(uuid.uuid4()) for _ in range(6))
+    full = {
+        on_box_id: b"\xff\xd8 on the box \x00\xff",
+        on_item_id: b"\xff\xd8 on the item \x00",
+        removed_id: b"\xff\xd8 removed \x00",
+    }
+    small = {on_box_id: b"\xff\xd8 box", on_item_id: b"\xff\xd8 item", removed_id: b"\xff\xd8 gone"}
+    changes = '{"photo": ["%s", null]}' % removed_id
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.executescript(VERSION_3_SCHEMA)
+        conn.execute(
+            "INSERT INTO boxes (id, tag_id, name, location, notes, created_at, updated_at, updated_by) "
+            "VALUES (?, 7, 'Camping', 'Shelf A, top', 'heavy', ?, ?, 'alice')",
+            (box_id, stamp, stamp),
+        )
+        conn.execute(
+            "INSERT INTO items (id, box_id, name, qty, created_at, updated_at) VALUES (?, ?, 'Tent', 2, ?, ?)",
+            (item_id, box_id, stamp, stamp),
+        )
+        for photo_id, owner, at in ((on_box_id, None, stamp), (on_item_id, item_id, later), (removed_id, None, later)):
+            conn.execute(
+                "INSERT INTO photos (id, box_id, item_id, width, height, size, data, thumb, created_at, created_by) "
+                "VALUES (?, ?, ?, 4, 3, ?, ?, ?, ?, 'alice')",
+                (photo_id, box_id, owner, len(full[photo_id]), full[photo_id], small[photo_id], at),
+            )
+        # taken off its box, as version 3 did it: the trigger keeps it
+        conn.execute("DELETE FROM photos WHERE id = ?", (removed_id,))
+        conn.execute(
+            "INSERT INTO history (id, at, actor, action, tag_id, box_id, box_name, item_id, item_name, changes) "
+            "VALUES (?, ?, 'alice', 'photo_removed', 7, ?, 'Camping', NULL, '', ?)",
+            (entry_id, later, box_id, changes),
+        )
+        conn.execute("INSERT INTO app_meta (key, value) VALUES ('samples_seeded', 'long ago')")
+    store = SqliteStore(path)
+    assert _tables(store) == VERSION_3_TABLES
+    before = _dump(store, VERSION_3_TABLES)
+    assert [len(before[table]) for table in sorted(VERSION_3_TABLES)] == [1, 1, 1, 1, 1, 2]
+    triggers = _triggers(store)
+    assert [name for name, _ in triggers] == ["photos_fill_tag_id", "photos_keep"]
+
+    store.bootstrap()
+    store.bootstrap()
+
+    assert _tables(store) == VERSION_3_TABLES | {"printed_tags"}
+    # not a row of what was there is gone or changed
+    assert _dump(store, VERSION_3_TABLES) == before
+    assert _triggers(store) == triggers
+    assert store.list_printed() == []
+    assert store.list_tag_ids() == [7]
+    assert store.get_meta(samples.META_KEY) == "long ago"
+    box = store.get_box(7)
+    assert (box["id"], box["name"], box["location"], box["notes"], box["updated_by"]) == (
+        box_id,
+        "Camping",
+        "Shelf A, top",
+        "heavy",
+        "alice",
+    )
+    assert [photo["id"] for photo in box["photos"]] == [on_box_id]
+    assert [(item["id"], item["name"], item["qty"]) for item in box["items"]] == [(item_id, "Tent", 2)]
+    assert [photo["id"] for photo in box["items"][0]["photos"]] == [on_item_id]
+    assert store.get_kept_photo(removed_id)["tag_id"] == 7
+    for photo_id in (on_box_id, on_item_id, removed_id):
+        assert store.get_photo_data(photo_id) == full[photo_id]
+        assert store.get_photo_data(photo_id, thumb=True) == small[photo_id]
+    entries = history.list_entries(store, 7, 50, None)
+    assert [(entry["id"], entry["action"]) for entry in entries] == [(entry_id, "photo_removed")]
+    assert [photo["id"] for photo in entries[0]["photos"]] == [removed_id]
+
+    # and the upgraded database takes the new kind of write
+    store.record_printed([7, 8], "bob")
+    store.record_printed([8], "carol")
+    assert [(row["tag_id"], row["times"], row["printed_by"]) for row in store.list_printed()] == [
+        (7, 1, "bob"),
+        (8, 2, "carol"),
+    ]
+    assert store.forget_printed(8) is True
+
+    # a later start leaves the prints, and everything else, where they are
+    printed = store.list_printed()
+    store.bootstrap()
+    assert store.list_printed() == printed
+    assert _dump(store, VERSION_3_TABLES) == before

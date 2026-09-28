@@ -22,8 +22,8 @@ log = logging.getLogger("scannage.bootstrap")
 DEPLOY_DIR = Path(__file__).resolve().parent.parent / "deploy"
 # A version bump runs every file again, which is safe because each statement
 # is idempotent. That is how a database at an older version is brought up in place.
-SCHEMA_FILES = ("02_schema.sql", "03_history_photos.sql", "04_kept_photos.sql")
-SCHEMA_VERSION = 3
+SCHEMA_FILES = ("02_schema.sql", "03_history_photos.sql", "04_kept_photos.sql", "05_printed_tags.sql")
+SCHEMA_VERSION = 4
 
 ROLE_SQL = """
 DO $$

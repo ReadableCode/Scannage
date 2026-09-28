@@ -72,7 +72,8 @@ item `name` 1 to 120, `qty` 1 to 9999. Strings are trimmed.
 | `DELETE /api/items/{item_id}` | | 204, or 404. Its photos are kept |
 | `GET /api/qr/{tag_id}.svg` | | QR code holding `{base_url}/b/{tag_id}` |
 
-The history and photo endpoints are listed in their own sections below.
+The history, photo and printed label endpoints are listed in their own
+sections below.
 
 Errors are `{"detail": "..."}`, always with a string, validation errors
 included. A store failure is 502. An `item_id` or `photo_id` that is not a
@@ -107,6 +108,7 @@ class Store(Protocol):
     def apply_schema(self, force: bool = False) -> bool: ...
     def health(self) -> tuple[bool, str]: ...
     def list_boxes(self) -> list[dict]: ...
+    def list_tag_ids(self) -> list[int]: ...
     def get_box(self, tag_id: int) -> dict | None: ...
     def get_box_by_id(self, box_id: str) -> dict | None: ...
     def upsert_box(self, tag_id: int, fields: dict, actor: str) -> dict: ...
@@ -130,6 +132,9 @@ class Store(Protocol):
         self, tag_id: int | None, limit: int, before: str | None, include_tests: bool = False
     ) -> list[dict]: ...
 
+    def list_printed(self) -> list[dict]: ...
+    def record_printed(self, tag_ids: list[int], actor: str) -> None: ...
+    def forget_printed(self, tag_id: int) -> bool: ...
     def get_meta(self, key: str) -> str | None: ...
     def set_meta(self, key: str, value: str) -> None: ...
 ```
@@ -170,6 +175,17 @@ The API reads history through it as well. `list_history` returns entries as
 they were written, without `photos`. `history.list_entries` adds `photos` to
 each: it collects the photo ids of the whole page and asks the store for them
 once, with `list_photos_by_ids`.
+
+`list_tag_ids` returns the tags that have a box, ascending. It reads the
+tags alone, never the items or photos of a box.
+
+`list_printed` returns the printed labels in the shape under Printed labels,
+ordered by `tag_id`. `record_printed` records one print of each of these
+tags, each tag once however often it is given, all with the same time and
+actor, and an empty list records nothing. `forget_printed` removes the row of
+one tag and returns whether there was one. None of the three writes history
+or touches a box. `list_tag_ids` and `list_printed` return every tag,
+negative ones included; the API leaves those out.
 
 `get_meta` and `set_meta` read and write `app_meta`, a small key/value table
 for one-time flags such as `samples_seeded`. It is not exposed by the API.
@@ -394,3 +410,66 @@ the history entry.
 
 With the PostgREST store nothing is deleted until the store has seen that
 `kept_photos` is served. Until then a delete of a box, item or photo is a 502.
+
+## Printed labels
+
+The app records which tags have had a label printed, so the label sheet can
+offer the next ones and a reprint is a deliberate choice.
+
+```json
+{
+  "tag_count": 250,
+  "printed": [
+    {
+      "tag_id": 1,
+      "first_printed_at": "2026-09-27T21:00:00.000000+00:00",
+      "last_printed_at": "2026-09-27T21:00:00.000000+00:00",
+      "times": 1,
+      "printed_by": ""
+    }
+  ],
+  "in_use": [1, 2],
+  "next": [3, 4, 5]
+}
+```
+
+`printed` is ordered by `tag_id`. `in_use` holds the tags that have a box,
+ascending. `next` holds every tag that is neither printed nor in use, in the
+order labels should be handed out: ascending from 1, with tag 0 last. It is
+the whole list, so the page takes as many from the front as it needs.
+
+| Method and path | Body | Returns |
+|---|---|---|
+| `GET /api/labels` | | the shape above |
+| `POST /api/labels/printed` | `{"tag_ids": [3, 4, 5]}`, 1 to 250 ids, each 0 to 249 | the shape above, after recording. A tag printed before has `times` raised by one and `last_printed_at` moved; `first_printed_at` stays. An id repeated in the body counts once |
+| `DELETE /api/labels/printed/{tag_id}` | | 204, or 404. Forgets that the tag was ever printed |
+
+`printed_by` is the `Remote-User` of the latest print, empty without one.
+Printing is not part of a box's history: a label can be printed long before
+a box exists.
+
+A browser cannot tell whether paper came out. A print is recorded when the
+print button is pressed, and the page offers to take it back.
+
+A body without `tag_ids`, with an empty list, with more than 250 ids, or
+with an id that is not an integer from 0 to 249 is a 422, and nothing of it
+is recorded. The 250 count the ids as sent, repeats included. A `tag_id`
+outside 0 to 249 in the address of the `DELETE` is a 422. Both writes are
+subject to the same origin check under Identity.
+
+A tag can be printed and in use at once, and is then in both lists. Deleting
+a box takes its tag out of `in_use` and leaves its label printed. Forgetting
+a print and printing the tag again starts over, with `times` 1.
+
+Tags with a negative id are never returned by the API, in `printed`, in
+`in_use` or in `next`. Those belong to tests against a live store.
+
+Printed labels live in their own table, `printed_tags`, one row per tag, with
+`tag_id` as its key and `times` at least 1. It references nothing, so a row
+needs no box and stays when a box is deleted. The times are written by the
+app.
+
+The SQLite store records a print in one statement per tag, inside one
+transaction. The PostgREST store reads the rows of the tags in the print with
+one request and writes them all back with one more, so two prints of the same
+tag at the same moment can count as one.

@@ -152,6 +152,12 @@ class ItemPatchBody(BaseModel):
     qty: Qty | None = None
 
 
+class PrintedBody(BaseModel):
+    tag_ids: Annotated[
+        list[Annotated[int, Field(ge=0, lt=config.TAG_COUNT)]], Field(min_length=1, max_length=config.TAG_COUNT)
+    ]
+
+
 # --- health and config --------------------------------------------------------
 
 
@@ -371,6 +377,47 @@ async def list_history(
 async def qr_svg(tag_id: TagId, request: Request):
     svg = await run_in_threadpool(qr.svg, f"{_base_url(request)}/b/{tag_id}")
     return Response(svg, media_type="image/svg+xml", headers={"Cache-Control": "no-store"})
+
+
+def _labels() -> dict:
+    store = get_store()
+    # negative tag ids belong to tests against a live store
+    printed = [row for row in store.list_printed() if row["tag_id"] >= 0]
+    in_use = [tag_id for tag_id in store.list_tag_ids() if tag_id >= 0]
+    taken = {row["tag_id"] for row in printed} | set(in_use)
+    # labels are handed out from 1 upward, and tag 0 goes last
+    order = [*range(1, config.TAG_COUNT), 0]
+    return {
+        "tag_count": config.TAG_COUNT,
+        "printed": printed,
+        "in_use": in_use,
+        "next": [tag_id for tag_id in order if tag_id not in taken],
+    }
+
+
+def _record_printed(tag_ids: list[int], actor: str) -> dict:
+    get_store().record_printed(tag_ids, actor)
+    return _labels()
+
+
+@app.get("/api/labels")
+async def get_labels():
+    return await run_in_threadpool(_labels)
+
+
+@app.post("/api/labels/printed")
+async def record_printed(body: PrintedBody, request: Request):
+    _require_same_origin(request)
+    # printing is not part of a box's history: a label can be printed long before a box exists
+    return await run_in_threadpool(_record_printed, body.tag_ids, _actor(request))
+
+
+@app.delete("/api/labels/printed/{tag_id}", status_code=204)
+async def forget_printed(tag_id: TagId, request: Request):
+    _require_same_origin(request)
+    if not await run_in_threadpool(get_store().forget_printed, tag_id):
+        raise HTTPException(status_code=404, detail="no label was printed for this tag")
+    return Response(status_code=204)
 
 
 # --- static frontend ----------------------------------------------------------

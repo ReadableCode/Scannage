@@ -32,6 +32,10 @@ With Docker:
 docker compose up -d
 ```
 
+Then open `https://<this machine's address>:8791`, on this machine or on a
+phone. The container serves https with a certificate it makes for itself, so
+the browser warns once. Choose to continue.
+
 Without Docker (needs [uv](https://docs.astral.sh/uv/)):
 
 ```bash
@@ -39,10 +43,13 @@ uv sync
 uv run python -m app
 ```
 
-Then open `http://localhost:8791`. With no configuration the inventory is a
-SQLite file at `data/scannage.db`.
+Then open `http://localhost:8791`. This is plain http unless
+`SCANNAGE_HTTPS=1` is set, see Built in https.
 
-`http://localhost:8791/?demo` shows a drawn shelf in place of the camera, which
+Either way, with no configuration the inventory is a SQLite file, in the
+`scannage_data` volume with Docker and at `data/scannage.db` without.
+
+Add `/?demo` to the address for a drawn shelf in place of the camera, which
 is the quickest way to see the live view working.
 
 A new database comes with six sample boxes on tags 1 to 6, so there is
@@ -59,17 +66,22 @@ Without the flag the script only creates missing tables.
 ### Using a phone
 
 Phone browsers only open the camera on an `https` page. The boxes list, the
-editor and the label sheet work over plain http. For the live view from a
-phone there are two ways:
+editor and the label sheet work over plain http.
 
-- put the app behind anything that serves https: a reverse proxy you already
-  run, Caddy, or Tailscale Serve
-- or turn on the built in https
+With Docker there is nothing to do: https is already on. Without Docker
+there are two ways to get the live view on a phone:
+
+- turn on the built in https with `SCANNAGE_HTTPS=1`
+- or put the app behind anything that serves https: a reverse proxy you
+  already run, Caddy, or Tailscale Serve
 
 ### Built in https
 
-Set `SCANNAGE_HTTPS=1` and the app serves https itself, with no proxy. On the
+With `SCANNAGE_HTTPS=1` the app serves https itself, with no proxy. On the
 first start it makes its own certificate and keeps it in `data/tls`.
+
+`compose.yaml` sets it, so with Docker it is on. Without Docker it is off
+until you set it:
 
 ```bash
 SCANNAGE_HTTPS=1 uv run python -m app
@@ -85,11 +97,14 @@ Then open `https://<this machine's address>:8791` on the phone.
 - The certificate covers `localhost`, `127.0.0.1`, the machine's hostname and
   its address on the local network. Add other names or addresses with
   `SCANNAGE_HTTPS_HOSTS`, comma separated. In a container the app only sees
-  the container's own name and address, so list the one the phone opens.
+  the container's own name and address, so the certificate does not cover
+  the host's. List the address the phone opens in `compose.yaml` and the
+  certificate matches it.
 - It is valid for 397 days and is replaced on a start within 30 days of its
   end, or when a name it should cover is missing. The phone then asks again.
 
-Leave it off behind a reverse proxy that already serves https.
+Leave it off behind a reverse proxy that already serves https. With Docker
+that means removing `SCANNAGE_HTTPS` from `compose.yaml`.
 
 ### Sign-in
 
@@ -99,9 +114,14 @@ if it is reachable by people who should not see it. When the proxy sends a
 
 ## Print labels
 
-Open `/labels`, choose the first tag number and how many, and print at 100%
-scale on matte paper. Put a label on two neighbouring faces of each box so it
-is visible from either side.
+Open `/labels` and print at 100% scale on matte paper. Put a label on two
+neighbouring faces of each box so it is visible from either side.
+
+The app keeps track of which labels have been printed. The sheet starts at
+the next tags that have never been printed and are not on a box. A print is
+recorded when the print button is pressed, because a browser cannot tell
+whether paper came out, and the page offers to take it back. Any tag can be
+printed again by its number, to replace a damaged label.
 
 ## Configuration
 
@@ -113,7 +133,7 @@ Set these in the environment or in a `.env` file in the repo root. See
 | `SCANNAGE_STORE` | `sqlite` | `sqlite` or `postgrest` |
 | `SCANNAGE_SQLITE_PATH` | `data/scannage.db` | where the SQLite file lives |
 | `SCANNAGE_BASE_URL` | taken from the request | the address printed into QR codes |
-| `SCANNAGE_HTTPS` | off | `1` or `true` serves https with a self signed certificate |
+| `SCANNAGE_HTTPS` | off, and on in `compose.yaml` | `1` or `true` serves https with a self signed certificate |
 | `SCANNAGE_HTTPS_HOSTS` | none | extra names or addresses for the certificate, comma separated |
 | `SCANNAGE_TLS_DIR` | `data/tls` | where the certificate and its key are kept |
 
@@ -171,7 +191,8 @@ skip, when those cannot be reached. They use negative tag numbers, which no
 printed tag can have, and remove the boxes they create. The photos of those
 boxes are kept like any other, so the tests then erase them, each by its id.
 The history entries they write stay, as all history does, and the API never
-returns them.
+returns them. The printed labels they record are on negative tag numbers too,
+and the tests forget each one again.
 
 ## Layout
 

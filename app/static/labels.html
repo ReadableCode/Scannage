@@ -14,32 +14,71 @@
   <div class="bar">
     <a class="brand" href="/"><span class="prompt">❯</span> scannage</a>
   </div>
+  <div id="banner" class="banner" role="status" hidden>
+    <span id="bannerText"></span>
+    <button id="bannerReload" class="btn secondary" type="button" hidden>reload</button>
+  </div>
 </header>
 
 <main class="page screen">
+  <h2><span class="sl">//</span> how to print</h2>
+  <ol class="steps">
+    <li>choose how many labels, and the size.</li>
+    <li>press print.</li>
+    <li>in the print window pick letter paper and 100% scale, not "fit to page".</li>
+    <li>cut along the dashed lines and put one label on each box.</li>
+  </ol>
+
   <h2><span class="sl">//</span> labels</h2>
-  <form id="controls" class="controls">
-    <div class="field">
-      <label for="first">first tag</label>
-      <input id="first" type="number" inputmode="numeric" min="0" step="1" value="1">
+  <div id="pick">
+    <div id="modes" class="modes" role="group" aria-label="which tags to print">
+      <button id="modeNext" class="on" type="button" aria-pressed="true">next
+        <span class="sub">never printed</span></button>
+      <button id="modeChoose" type="button" aria-pressed="false">choose
+        <span class="sub">a reprint, or a range</span></button>
     </div>
-    <div class="field">
-      <label for="count">how many</label>
-      <input id="count" type="number" inputmode="numeric" min="1" step="1" value="12">
-    </div>
-    <div class="field wide">
-      <label for="size">size</label>
-      <select id="size">
-        <option value="small">6 per page</option>
-        <option value="large">2 per page, large, for far shelves</option>
-      </select>
-    </div>
-    <button id="print" class="btn primary" type="button">print</button>
-  </form>
-  <p id="summary" class="hint"></p>
+    <form id="controls" class="controls">
+      <div id="firstField" class="field" hidden>
+        <label for="first">first tag</label>
+        <input id="first" type="number" inputmode="numeric" min="0" step="1" value="1">
+      </div>
+      <div class="field">
+        <label for="count">how many</label>
+        <input id="count" type="number" inputmode="numeric" min="1" step="1" value="12">
+      </div>
+      <div class="field wide">
+        <label for="size">size</label>
+        <select id="size">
+          <option value="small">6 per page</option>
+          <option value="large">2 per page, large, for far shelves</option>
+        </select>
+      </div>
+      <button id="print" class="btn primary" type="button" disabled>print</button>
+    </form>
+    <p id="summary" class="hint"></p>
+    <p id="printNote" class="note err" role="status" hidden></p>
+    <button id="printPlain" class="quiet" type="button" hidden>print without recording</button>
+    <p id="done" class="note done" role="status" hidden>
+      <span id="doneText"></span>
+      <button id="undo" class="quiet" type="button">take it back</button>
+    </p>
+    <p id="plain" class="hint" hidden>prints are not recorded on this server.</p>
+  </div>
   <p class="hint">the large square is the tag the live view reads. the small code opens the same box from
   any camera app. neither holds the contents, only the number. print at 100% scale on letter paper,
   matte if possible.</p>
+
+  <div id="map" hidden>
+    <h2><span class="sl">//</span> tags <span id="freeCount" class="count"></span></h2>
+    <ul class="legend">
+      <li><span class="cell"></span>free</li>
+      <li><span class="cell printed"></span>printed</li>
+      <li><span class="cell used"></span>in use</li>
+      <li><span class="cell printed used"></span>printed and in use</li>
+    </ul>
+    <p class="hint">tap a tag to print it on its own, for a reprint.</p>
+    <div id="cells" class="cells"></div>
+  </div>
 
   <h2><span class="sl">//</span> preview</h2>
 </main>

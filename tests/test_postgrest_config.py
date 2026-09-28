@@ -212,3 +212,53 @@ def test_history_is_selected_newest_first():
 def test_negative_tag_history_is_refused_before_any_request(store):
     # the address does not resolve, so reaching for the network would raise
     assert store.list_history(-9001, 50, None) == []
+
+
+# --- printed labels, as far as they go without a server -----------------------
+
+
+def test_printed_labels_are_selected_by_tag():
+    columns = postgrest.PRINTED_SELECT["select"].split(",")
+
+    assert columns == ["tag_id", "first_printed_at", "last_printed_at", "times", "printed_by"]
+    assert postgrest.PRINTED_SELECT["order"] == "tag_id.asc"
+    assert postgrest.PRINTED_TAGS == "printed_tags"
+
+
+def test_a_print_keeps_the_first_time_and_counts_one_more():
+    first = "2026-05-01T10:00:00.000000+00:00"
+    now = "2026-06-01T10:00:00.000000+00:00"
+    known = {
+        -9001: {
+            "tag_id": -9001,
+            "first_printed_at": first,
+            "last_printed_at": first,
+            "times": 4,
+            "printed_by": "alice",
+        }
+    }
+
+    rows = postgrest.printed_rows([-9002, -9001], known, now, "bob")
+
+    assert rows == [
+        {"tag_id": -9002, "first_printed_at": now, "last_printed_at": now, "times": 1, "printed_by": "bob"},
+        {"tag_id": -9001, "first_printed_at": first, "last_printed_at": now, "times": 5, "printed_by": "bob"},
+    ]
+    # a bulk insert takes only objects that all have the same keys
+    assert [list(row) for row in rows] == [list(postgrest.PRINTED_SELECT["select"].split(","))] * 2
+    assert postgrest.printed_rows([], known, now, "bob") == []
+
+
+def test_the_ids_of_a_whole_print_fit_in_one_address(store):
+    ids = ",".join(str(tag_id) for tag_id in range(config.TAG_COUNT))
+
+    request = httpx.Request(
+        "GET", f"{store.url}/{postgrest.PRINTED_TAGS}", params={**postgrest.PRINTED_SELECT, "tag_id": f"in.({ids})"}
+    )
+
+    assert len(str(request.url)) < 4000
+
+
+def test_a_print_of_nothing_means_no_request(store):
+    # the address does not resolve, so reaching for the network would raise
+    assert store.record_printed([], "alice") is None
