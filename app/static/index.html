@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>scannage</title>
+<link rel="stylesheet" href="/static/tokens.css?v=__ASSET_VERSION__">
+<link rel="stylesheet" href="/static/style.css?v=__ASSET_VERSION__">
+</head>
+<body class="app">
+
+<header id="top">
+  <div class="bar">
+    <a class="brand" href="/"><span class="prompt">❯</span> scannage</a>
+    <input id="search" type="search" placeholder="find an item" aria-label="find an item"
+      autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+  </div>
+  <div id="banner" class="banner" role="status" hidden>
+    <span id="bannerText"></span>
+    <button id="bannerReload" class="btn secondary" type="button" hidden>reload</button>
+  </div>
+</header>
+
+<main id="views">
+  <section id="viewScan" class="view" hidden>
+    <div id="stage">
+      <video id="video" playsinline muted autoplay></video>
+      <canvas id="scene" hidden></canvas>
+      <canvas id="overlay"></canvas>
+    </div>
+    <div id="hud" hidden>
+      <span id="status"></span>
+      <button id="res" class="btn secondary" type="button" title="detection width in pixels">960</button>
+    </div>
+    <div id="start">
+      <h2><span class="sl">//</span> scan</h2>
+      <p>point the camera at a tag. tap a tag to set up the box or change what is in it.</p>
+      <button id="startBtn" class="btn primary" type="button">start camera</button>
+      <p id="err" class="err"></p>
+      <p class="small">no camera here? try the <a href="/?demo">simulated shelf</a>.</p>
+    </div>
+  </section>
+
+  <section id="viewBoxes" class="view" hidden>
+    <div class="page">
+      <h2><span class="sl">//</span> new box</h2>
+      <form id="newForm" class="newBox">
+        <label for="newTag">tag</label>
+        <input id="newTag" type="number" inputmode="numeric" min="0" step="1" autocomplete="off">
+        <button id="newBtn" class="btn primary" type="submit">new box</button>
+      </form>
+      <p id="newHint" class="hint"></p>
+
+      <h2><span class="sl">//</span> boxes <span id="boxCount" class="count"></span></h2>
+      <ul id="boxList" class="boxList"></ul>
+      <p id="boxEmpty" class="empty" hidden></p>
+    </div>
+  </section>
+</main>
+
+<nav id="tabs">
+  <a id="tabScan" href="#scan">scan</a>
+  <a id="tabBoxes" href="#boxes">boxes</a>
+  <a id="tabLabels" href="/labels">labels</a>
+</nav>
+
+<aside id="sheet" aria-label="box editor" hidden>
+  <div class="sheetHead">
+    <span id="sheetTag" class="tagName"></span>
+    <span id="saveState" class="state" role="status" hidden></span>
+    <button id="sheetClose" class="btn primary" type="button">done</button>
+  </div>
+
+  <label for="boxName">box name</label>
+  <input id="boxName" type="text" maxlength="120" autocomplete="off">
+  <label for="boxLocation">where it lives</label>
+  <input id="boxLocation" type="text" maxlength="120" autocomplete="off">
+  <label for="boxNotes">notes</label>
+  <textarea id="boxNotes" rows="2" maxlength="2000"></textarea>
+
+  <h2><span class="sl">//</span> items</h2>
+  <ul id="items"></ul>
+  <form id="addForm">
+    <input id="addName" type="text" maxlength="120" placeholder="add an item" aria-label="add an item"
+      autocomplete="off" enterkeyhint="done">
+    <button class="btn secondary" type="submit">add</button>
+  </form>
+
+  <div id="deleteRow" class="danger" hidden>
+    <button id="deleteBtn" class="btn secondary warn" type="button">delete box</button>
+  </div>
+  <div id="confirmRow" class="danger confirm" hidden>
+    <p id="confirmText"></p>
+    <button id="confirmYes" class="btn warnSolid" type="button">delete</button>
+    <button id="confirmNo" class="btn secondary" type="button">keep</button>
+  </div>
+</aside>
+
+<script src="/static/vendor/cv.js?v=__ASSET_VERSION__"></script>
+<script src="/static/vendor/aruco.js?v=__ASSET_VERSION__"></script>
+<script src="/static/api.js?v=__ASSET_VERSION__"></script>
+<script src="/static/data.js?v=__ASSET_VERSION__"></script>
+<script src="/static/scan.js?v=__ASSET_VERSION__"></script>
+<script src="/static/editor.js?v=__ASSET_VERSION__"></script>
+<script src="/static/app.js?v=__ASSET_VERSION__"></script>
+</body>
+</html>

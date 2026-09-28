@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>scannage labels</title>
+<link rel="stylesheet" href="/static/tokens.css?v=__ASSET_VERSION__">
+<link rel="stylesheet" href="/static/style.css?v=__ASSET_VERSION__">
+<link rel="stylesheet" href="/static/labels.css?v=__ASSET_VERSION__">
+</head>
+<body class="labels">
+
+<header id="top" class="screen">
+  <div class="bar">
+    <a class="brand" href="/"><span class="prompt">❯</span> scannage</a>
+  </div>
+</header>
+
+<main class="page screen">
+  <h2><span class="sl">//</span> labels</h2>
+  <form id="controls" class="controls">
+    <div class="field">
+      <label for="first">first tag</label>
+      <input id="first" type="number" inputmode="numeric" min="0" step="1" value="1">
+    </div>
+    <div class="field">
+      <label for="count">how many</label>
+      <input id="count" type="number" inputmode="numeric" min="1" step="1" value="12">
+    </div>
+    <div class="field wide">
+      <label for="size">size</label>
+      <select id="size">
+        <option value="small">6 per page</option>
+        <option value="large">2 per page, large, for far shelves</option>
+      </select>
+    </div>
+    <button id="print" class="btn primary" type="button">print</button>
+  </form>
+  <p id="summary" class="hint"></p>
+  <p class="hint">the large square is the tag the live view reads. the small code opens the same box from
+  any camera app. neither holds the contents, only the number. print at 100% scale on letter paper,
+  matte if possible.</p>
+
+  <h2><span class="sl">//</span> preview</h2>
+</main>
+
+<div id="sheets" class="sheets"></div>
+
+<nav id="tabs" class="screen">
+  <a href="/#scan">scan</a>
+  <a href="/#boxes">boxes</a>
+  <a class="on" href="/labels" aria-current="page">labels</a>
+</nav>
+
+<script src="/static/vendor/cv.js?v=__ASSET_VERSION__"></script>
+<script src="/static/vendor/aruco.js?v=__ASSET_VERSION__"></script>
+<script src="/static/api.js?v=__ASSET_VERSION__"></script>
+<script src="/static/labels.js?v=__ASSET_VERSION__"></script>
+</body>
+</html>

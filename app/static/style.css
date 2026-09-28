@@ -1,0 +1,341 @@
+/* Built on tokens.css. Monospace everywhere, lowercase labels, hairline borders, no shadows. */
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 15px;
+  line-height: 1.4;
+  -webkit-text-size-adjust: 100%;
+}
+
+body.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+a { color: var(--green-bright); }
+
+h2 {
+  margin: 1.4rem 0 .7rem;
+  padding-bottom: .45rem;
+  border-bottom: 1px solid var(--border);
+  font-size: .95rem;
+  font-weight: 700;
+}
+h2 .sl { color: var(--green-bright); }
+h2 .count { color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+
+label {
+  display: block;
+  margin: .7rem 0 .25rem;
+  font-size: .74rem;
+  color: var(--muted);
+}
+
+/* 16px keeps a phone from zooming the page when a field takes focus */
+input, textarea, select, button {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  color: var(--ink);
+}
+
+input, textarea, select {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+input:focus, textarea:focus, select:focus { border-color: var(--green-bright); }
+input::placeholder, textarea::placeholder { color: var(--muted); }
+textarea { display: block; resize: vertical; min-height: 4.2em; }
+input[type="search"]::-webkit-search-decoration { -webkit-appearance: none; }
+
+.btn {
+  display: inline-block;
+  padding: .55rem 1.1rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  font-size: .9rem;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.btn.primary { background: var(--green); color: var(--bg); font-weight: 600; }
+.btn.secondary { background: var(--surface); color: var(--ink); border-color: var(--border); }
+.btn.warn { color: var(--dot-red); }
+.btn.warnSolid { background: var(--dot-red); color: var(--bg); font-weight: 600; }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn:focus-visible, #tabs a:focus-visible, .boxRow:focus-visible { outline: 1px solid var(--green-bright); outline-offset: 2px; }
+
+.hint, .small { margin: .45rem 0 0; font-size: .78rem; color: var(--muted); }
+.err { color: var(--dot-red); }
+.empty { margin: 1.2rem 0; color: var(--ink-2); }
+
+/* -------------------------------------------------------------------- top */
+
+#top {
+  flex: none;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding-top: env(safe-area-inset-top);
+}
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px calc(env(safe-area-inset-right) + 12px) 8px calc(env(safe-area-inset-left) + 12px);
+}
+.brand {
+  flex: none;
+  color: var(--ink);
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.brand .prompt { color: var(--green-bright); }
+#search { flex: 1; min-width: 0; }
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  font-size: .82rem;
+  color: var(--amber-bright);
+}
+.banner::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--dot-red);
+}
+.banner span { flex: 1; }
+.banner .btn { padding: .35rem .9rem; }
+
+/* ------------------------------------------------------------------ views */
+
+#views { flex: 1; position: relative; min-height: 0; }
+.view { position: absolute; inset: 0; }
+
+#stage { position: absolute; inset: 0; background: var(--bg); overflow: hidden; }
+#video, #scene, #overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
+#video { object-fit: cover; }
+#scene { object-fit: contain; }
+#overlay { touch-action: manipulation; }
+
+#hud {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px calc(env(safe-area-inset-right) + 10px) 6px calc(env(safe-area-inset-left) + 12px);
+  background: var(--bg);
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  border-bottom: 1px solid var(--border);
+}
+#status {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: .74rem;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+#res { flex: none; min-width: 64px; padding: .35rem .6rem; font-size: .8rem; font-variant-numeric: tabular-nums; }
+
+#start {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  max-width: 440px;
+  margin: 0 auto;
+  padding: 24px;
+  background: var(--bg);
+}
+#start h2 { align-self: stretch; margin-top: 0; }
+#start p { margin: 0 0 1rem; color: var(--ink-2); }
+#start .btn { padding: .8rem 1.4rem; font-size: 1rem; }
+#start .err { min-height: 1.4em; margin: .8rem 0 0; color: var(--dot-red); }
+#start .small { color: var(--muted); }
+
+#viewBoxes { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.page {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 0 calc(env(safe-area-inset-right) + 14px) 28px calc(env(safe-area-inset-left) + 14px);
+}
+
+.newBox { display: flex; align-items: center; gap: 10px; }
+.newBox label { margin: 0; }
+.newBox input { width: 6.5em; font-variant-numeric: tabular-nums; }
+.newBox .btn { flex: none; }
+
+.boxList { list-style: none; margin: 0; padding: 0; }
+.boxList li { margin-bottom: 8px; }
+.boxRow {
+  display: flex;
+  gap: 14px;
+  width: 100%;
+  padding: 12px 14px;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.boxRow .num { flex: none; color: var(--green-bright); font-weight: 700; font-variant-numeric: tabular-nums; }
+.boxRow .body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.boxRow .head { display: flex; align-items: baseline; gap: 10px; }
+.boxRow .name { flex: 1; min-width: 0; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.boxRow .n { flex: none; font-size: .74rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.boxRow .where { font-size: .8rem; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.boxRow .items { font-size: .8rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ------------------------------------------------------------------- tabs */
+
+#tabs {
+  flex: none;
+  display: flex;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+#tabs a {
+  flex: 1;
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-2);
+  text-decoration: none;
+  touch-action: manipulation;
+}
+#tabs a + a { border-left: 1px solid var(--border); }
+#tabs a.on { color: var(--ink); font-weight: 700; }
+#tabs a.on::before { content: "\276F"; margin-right: .5em; color: var(--green-bright); }
+
+/* ----------------------------------------------------------------- editor */
+
+#sheet {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  z-index: 20;
+  max-height: 84vh;
+  max-height: 84dvh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 12px calc(env(safe-area-inset-right) + 14px) calc(env(safe-area-inset-bottom) + 16px) calc(env(safe-area-inset-left) + 14px);
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+.sheetHead { display: flex; align-items: center; gap: 12px; }
+.tagName { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sheetHead .btn { flex: none; }
+
+.state {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  font-size: .74rem;
+  color: var(--muted);
+}
+/* keeps the done button on the right while the state is hidden */
+.state[hidden] { display: block !important; visibility: hidden; }
+.state::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green-bright);
+  box-shadow: 0 0 6px rgba(86, 211, 100, .65);
+}
+.state.saving::before { background: var(--amber-bright); box-shadow: none; }
+.state.error { color: var(--dot-red); }
+.state.error::before { background: var(--dot-red); box-shadow: 0 0 6px rgba(248, 113, 113, .6); }
+
+#items { list-style: none; margin: 0 0 10px; padding: 0; }
+#items li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+#items li.pending { opacity: .6; }
+#items .name {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 6px;
+  background: transparent;
+  border-color: transparent;
+  text-overflow: ellipsis;
+}
+#items .name:focus { border-color: var(--green-bright); background: var(--bg); }
+#items .name:disabled { color: var(--ink); -webkit-text-fill-color: var(--ink); }
+#items .qty { min-width: 3ch; text-align: center; font-variant-numeric: tabular-nums; }
+#items button {
+  flex: none;
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+#items button:disabled { opacity: .4; cursor: default; }
+#items .rm { background: transparent; border-color: transparent; color: var(--dot-red); font-size: .8rem; }
+#items .none { padding: 10px 0; color: var(--muted); border-bottom: 0; }
+
+#addForm { display: flex; gap: 8px; }
+#addForm input { flex: 1; min-width: 0; }
+#addForm .btn { flex: none; }
+
+.danger { margin-top: 1.6rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+.confirm p { margin: 0 0 .8rem; color: var(--amber-bright); font-size: .85rem; }
+.confirm .btn { margin-right: 8px; }
+
+/* a side panel once there is room, so the list or the camera stays in view */
+@media (min-width: 900px) {
+  #sheet {
+    top: 0;
+    left: auto;
+    width: 420px;
+    max-height: none;
+    padding-top: 16px;
+    border-top: 0;
+    border-left: 1px solid var(--border);
+    border-radius: 0;
+  }
+  body.editing #top,
+  body.editing #views,
+  body.editing #tabs { margin-right: 420px; }
+  #tabs a { min-height: 48px; }
+}
