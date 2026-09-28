@@ -262,6 +262,10 @@ button.logRow { cursor: pointer; touch-action: manipulation; }
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
+/* the photos an entry refers to, under its two lines */
+.log .thumbs { align-items: center; gap: 6px; padding-bottom: 10px; }
+.log .thumb { width: 40px; height: 40px; }
+.log .rest { font-size: .74rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 .log .note { margin: .7rem 0; }
 .log .quiet { margin-top: 4px; }
 

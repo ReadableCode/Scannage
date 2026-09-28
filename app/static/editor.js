@@ -558,7 +558,8 @@
     if (!cur) return;
     var shots = photoCount(cur);
     confirmText.textContent = 'delete box ' + data.pad(cur.tag) + ' and its ' + count(cur.items.length, 'item') +
-      (shots ? ' and ' + count(shots, 'photo') : '') + '? the tag becomes free.';
+      (shots ? ' and ' + count(shots, 'photo') : '') + '? the tag becomes free.' +
+      (shots ? ' photos are kept and can be found in history.' : '');
     deleteRow.hidden = true;
     confirmRow.hidden = false;
   });

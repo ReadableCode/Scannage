@@ -11,8 +11,25 @@ import pytest
 
 from app import bootstrap, config
 
-TABLES = ("boxes", "items", "app_meta", "history", "photos")
+TABLES = ("boxes", "items", "app_meta", "history", "photos", "kept_photos")
 ROLE = "scannage_user"
+EVERYTHING = ("SELECT", "INSERT", "UPDATE", "DELETE")
+# A kept photo is written by the trigger, read, and erased on purpose. It is never changed.
+PRIVILEGES = {table: EVERYTHING for table in TABLES} | {"kept_photos": ("SELECT", "INSERT", "DELETE")}
+
+PHOTO_COLUMNS = {
+    "id": "uuid",
+    "box_id": "uuid",
+    "item_id": "uuid",
+    "width": "integer",
+    "height": "integer",
+    "size": "integer",
+    "data": "bytea",
+    "thumb": "bytea",
+    "created_at": "timestamp with time zone",
+    "created_by": "text",
+    "tag_id": "integer",
+}
 
 
 def _columns(cur, table: str) -> dict[str, str]:
@@ -35,6 +52,26 @@ def _foreign_keys(cur, table: str) -> dict[str, tuple[str, str]]:
     for name, target, on_delete in cur.fetchall():
         found[name] = (target, on_delete.decode() if isinstance(on_delete, bytes) else on_delete)
     return found
+
+
+def _nullable(cur, table: str) -> list[str]:
+    cur.execute(
+        """SELECT column_name FROM information_schema.columns
+           WHERE table_schema = 'scannage' AND table_name = %s AND is_nullable = 'YES'""",
+        (table,),
+    )
+    return sorted(row[0] for row in cur.fetchall())
+
+
+def _triggers(cur, table: str) -> dict[str, tuple[str, str, str, str]]:
+    """Trigger name to (when, on what, for each what, what it runs)."""
+    cur.execute(
+        """SELECT trigger_name, action_timing, event_manipulation, action_orientation, action_statement
+           FROM information_schema.triggers
+           WHERE event_object_schema = 'scannage' AND event_object_table = %s""",
+        (table,),
+    )
+    return {name: (timing, event, each, statement) for name, timing, event, each, statement in cur.fetchall()}
 
 
 def _indexes(cur, table: str) -> dict[str, str]:
@@ -76,9 +113,10 @@ def test_role_can_use_the_tables(cur):
     cur.execute("SELECT has_schema_privilege(%s, 'scannage', 'USAGE')", (ROLE,))
     assert cur.fetchone()[0] is True
     for table in TABLES:
-        for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+        for privilege in EVERYTHING:
             cur.execute("SELECT has_table_privilege(%s, %s, %s)", (ROLE, f"scannage.{table}", privilege))
-            assert cur.fetchone()[0] is True, f"{ROLE} lacks {privilege} on {table}"
+            wanted = privilege in PRIVILEGES[table]
+            assert cur.fetchone()[0] is wanted, f"{ROLE} must {'have' if wanted else 'not have'} {privilege} on {table}"
 
 
 def test_nothing_is_granted_to_web_anon(cur):
@@ -131,23 +169,8 @@ def test_history_indexes(cur):
 
 
 def test_photo_columns(cur):
-    assert _columns(cur, "photos") == {
-        "id": "uuid",
-        "box_id": "uuid",
-        "item_id": "uuid",
-        "width": "integer",
-        "height": "integer",
-        "size": "integer",
-        "data": "bytea",
-        "thumb": "bytea",
-        "created_at": "timestamp with time zone",
-        "created_by": "text",
-    }
-    cur.execute(
-        """SELECT column_name FROM information_schema.columns
-           WHERE table_schema = 'scannage' AND table_name = 'photos' AND is_nullable = 'YES'"""
-    )
-    assert [row[0] for row in cur.fetchall()] == ["item_id"]
+    assert _columns(cur, "photos") == PHOTO_COLUMNS
+    assert _nullable(cur, "photos") == ["item_id", "tag_id"]
 
 
 def test_photos_cascade_with_their_box_and_their_item(cur):
@@ -164,6 +187,62 @@ def test_photo_indexes(cur):
     assert "(item_id)" in indexes["photos_item_id_idx"]
 
 
+def test_kept_photo_columns(cur):
+    assert _columns(cur, "kept_photos") == {**PHOTO_COLUMNS, "removed_at": "timestamp with time zone"}
+    assert _nullable(cur, "kept_photos") == ["item_id", "tag_id"]
+    assert "(id)" in _indexes(cur, "kept_photos")["kept_photos_pkey"]
+
+
+def test_kept_photos_reference_nothing_so_no_delete_reaches_them(cur):
+    assert _foreign_keys(cur, "kept_photos") == {}
+    cur.execute(
+        """SELECT conname FROM pg_constraint
+           WHERE confrelid = 'scannage.kept_photos'::regclass AND contype = 'f'"""
+    )
+    assert cur.fetchall() == [], "something references kept_photos"
+
+
+def test_triggers_on_photos(cur):
+    triggers = _triggers(cur, "photos")
+
+    assert sorted(triggers) == ["photos_fill_tag_id", "photos_keep"], "photos must have exactly these two triggers"
+    assert triggers["photos_keep"][:3] == ("BEFORE", "DELETE", "ROW"), "a photo must be kept before it is deleted"
+    assert "photos_keep()" in triggers["photos_keep"][3]
+    assert triggers["photos_fill_tag_id"][:3] == ("BEFORE", "INSERT", "ROW")
+    assert "photos_fill_tag_id()" in triggers["photos_fill_tag_id"][3]
+
+
+def test_triggers_on_photos_are_switched_on(cur):
+    cur.execute(
+        """SELECT tgname, tgenabled FROM pg_trigger
+           WHERE tgrelid = 'scannage.photos'::regclass AND NOT tgisinternal"""
+    )
+    found = {name: state.decode() if isinstance(state, bytes) else state for name, state in cur.fetchall()}
+    assert found == {"photos_fill_tag_id": "O", "photos_keep": "O"}, "O is on, D is off"
+
+
+def test_nothing_stands_between_a_kept_photo_and_being_erased_on_purpose(cur):
+    assert _triggers(cur, "kept_photos") == {}
+
+
+def test_trigger_functions_run_as_the_role_doing_the_write(cur):
+    cur.execute(
+        """SELECT proname, prosecdef, prorettype::regtype::text FROM pg_proc
+           WHERE pronamespace = 'scannage'::regnamespace AND proname = ANY(%s)""",
+        (["photos_fill_tag_id", "photos_keep"],),
+    )
+    assert sorted(cur.fetchall()) == [("photos_fill_tag_id", False, "trigger"), ("photos_keep", False, "trigger")]
+
+
+def test_every_photo_carries_the_tag_of_its_box(cur):
+    cur.execute(
+        """SELECT count(*) FROM scannage.photos AS photo
+           LEFT JOIN scannage.boxes AS box ON box.id = photo.box_id
+           WHERE photo.tag_id IS DISTINCT FROM box.tag_id"""
+    )
+    assert cur.fetchone() == (0,), "photos whose tag_id is missing or is not the tag of their box"
+
+
 def test_bytea_is_sent_as_hex(cur):
     # the store reads photos through JSON and expects the hex form
     cur.execute("SELECT current_setting('bytea_output')")
@@ -171,7 +250,7 @@ def test_bytea_is_sent_as_hex(cur):
 
 
 def test_schema_version_is_stamped(cur):
-    assert bootstrap.SCHEMA_VERSION == 2
+    assert bootstrap.SCHEMA_VERSION == 3
     cur.execute("SELECT version FROM scannage.deploy_meta WHERE id = 1")
     assert cur.fetchone() == (bootstrap.SCHEMA_VERSION,)
 

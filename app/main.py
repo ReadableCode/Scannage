@@ -314,11 +314,24 @@ async def get_photo_thumb(photo_id: str):
     return await _photo_response(photo_id, thumb=True)
 
 
-@app.delete("/api/photos/{photo_id}", status_code=204)
-async def delete_photo(photo_id: str, request: Request):
-    _require_same_origin(request)
-    if not await run_in_threadpool(history.delete_photo, get_store(), photo_id, _actor(request)):
+def _remove_photo(photo_id: str, actor: str) -> None:
+    if not history.delete_photo(get_store(), photo_id, actor):
+        raise HTTPException(status_code=404, detail="no such photo on a box or item")
+
+
+def _erase_photo(photo_id: str, actor: str) -> None:
+    store = get_store()
+    if store.get_photo(photo_id) is not None:
+        raise HTTPException(status_code=409, detail="this photo is still on a box or item, remove it first")
+    if not history.erase_photo(store, photo_id, actor):
         raise HTTPException(status_code=404, detail="no such photo")
+
+
+@app.delete("/api/photos/{photo_id}", status_code=204)
+async def delete_photo(photo_id: str, request: Request, erase: bool = False):
+    _require_same_origin(request)
+    # without erase the photo is kept, and erase is the only way it leaves the database
+    await run_in_threadpool(_erase_photo if erase else _remove_photo, photo_id, _actor(request))
     return Response(status_code=204)
 
 
@@ -348,7 +361,7 @@ async def list_history(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     before: str | None = None,
 ):
-    return await run_in_threadpool(get_store().list_history, tag_id, limit, _before(before))
+    return await run_in_threadpool(history.list_entries, get_store(), tag_id, limit, _before(before))
 
 
 # --- labels -------------------------------------------------------------------

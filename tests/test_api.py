@@ -17,7 +17,19 @@ from app.stores.sqlite import SqliteStore
 SVG_NS = "{http://www.w3.org/2000/svg}"
 
 PHOTO_KEYS = {"id", "box_id", "item_id", "width", "height", "size", "created_at", "created_by"}
-HISTORY_KEYS = {"id", "at", "actor", "action", "tag_id", "box_id", "box_name", "item_id", "item_name", "changes"}
+HISTORY_KEYS = {
+    "id",
+    "at",
+    "actor",
+    "action",
+    "tag_id",
+    "box_id",
+    "box_name",
+    "item_id",
+    "item_name",
+    "changes",
+    "photos",
+}
 PHOTO_CACHE = "private, max-age=31536000, immutable"
 
 RED = (220, 30, 30)
@@ -85,6 +97,26 @@ def _opened(body: bytes) -> Image.Image:
 def _is_close(pixel: tuple[int, ...], colour: tuple[int, int, int]) -> bool:
     # JPEG does not keep colours exactly
     return all(abs(got - want) < 40 for got, want in zip(pixel, colour))
+
+
+def _kept(photo: dict) -> dict:
+    return {**photo, "kept": True}
+
+
+def _live(photo: dict) -> dict:
+    return {**photo, "kept": False}
+
+
+def _bytes(client, photo: dict) -> tuple[bytes, bytes]:
+    """The image and its thumbnail, as served."""
+    served = []
+    for path in (f"/api/photos/{photo['id']}", f"/api/photos/{photo['id']}/thumb"):
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        assert resp.headers["content-type"] == "image/jpeg"
+        assert resp.headers["cache-control"] == PHOTO_CACHE
+        served.append(resp.content)
+    return served[0], served[1]
 
 
 def _history(client, **params) -> list[dict]:
@@ -420,6 +452,7 @@ def test_cross_origin_writes_are_403(client):
         _upload(client, "/api/boxes/7/photos", **evil),
         _upload(client, f"/api/items/{item['id']}/photos", **evil),
         client.delete(f"/api/photos/{photo['id']}", headers=evil),
+        client.delete(f"/api/photos/{photo['id']}", params={"erase": 1}, headers=evil),
     ]
 
     for resp in responses:
@@ -651,6 +684,7 @@ def test_creating_a_box_is_recorded(client, clock):
         "item_name": "",
         # notes was left empty, and an empty field is not a change
         "changes": {"name": [None, "Camping"], "location": [None, "Shelf A, top"]},
+        "photos": [],
     }
 
 
@@ -704,6 +738,7 @@ def test_refused_writes_record_nothing(client):
     assert client.delete(f"/api/items/{uuid.uuid4()}").status_code == 404
     assert client.delete("/api/boxes/8").status_code == 404
     assert client.delete(f"/api/photos/{uuid.uuid4()}").status_code == 404
+    assert client.delete(f"/api/photos/{uuid.uuid4()}", params={"erase": 1}).status_code == 404
     assert _upload(client, "/api/boxes/7/photos", b"not an image").status_code == 422
 
     assert _history(client) == before
@@ -1092,14 +1127,16 @@ def test_a_history_failure_does_not_fail_the_write(tmp_path):
             changed = client.patch(f"/api/items/{added.json()['id']}", json={"qty": 2})
             photo = _upload(client, "/api/boxes/7/photos")
             unphoto = client.delete(f"/api/photos/{photo.json()['id']}")
+            erased = client.delete(f"/api/photos/{photo.json()['id']}", params={"erase": 1})
+            gone = client.get(f"/api/photos/{photo.json()['id']}")
             removed = client.delete(f"/api/items/{added.json()['id']}")
             box = client.get("/api/boxes/7").json()
             deleted = client.delete("/api/boxes/7")
     finally:
         stores.set_store(None)
 
-    statuses = [resp.status_code for resp in (created, renamed, added, changed, photo, unphoto, removed, deleted)]
-    assert statuses == [200, 200, 201, 200, 201, 204, 204, 204]
+    responses = (created, renamed, added, changed, photo, unphoto, erased, gone, removed, deleted)
+    assert [resp.status_code for resp in responses] == [200, 200, 201, 200, 201, 204, 204, 404, 204, 204]
     assert box["name"] == "Camping gear"
     assert box["items"] == []
 
@@ -1430,6 +1467,35 @@ def test_a_box_holds_at_most_12_photos(client):
     assert _upload(client, "/api/boxes/7/photos").status_code == 201
 
 
+def test_the_12_count_only_photos_that_are_on_the_box_or_item(client, store):
+    item = client.post("/api/boxes/7/items", json={"name": "Tent"}).json()
+    on_box = [_upload(client, "/api/boxes/7/photos").json() for _ in range(12)]
+    on_item = [_upload(client, f"/api/items/{item['id']}/photos").json() for _ in range(12)]
+    for photo in on_box[:5] + on_item[:4]:
+        assert client.delete(f"/api/photos/{photo['id']}").status_code == 204
+
+    # nine are kept, and none of them takes up room
+    for _ in range(5):
+        assert _upload(client, "/api/boxes/7/photos").status_code == 201
+    for _ in range(4):
+        assert _upload(client, f"/api/items/{item['id']}/photos").status_code == 201
+    assert _upload(client, "/api/boxes/7/photos").status_code == 409
+    assert _upload(client, f"/api/items/{item['id']}/photos").status_code == 409
+
+    box = client.get("/api/boxes/7").json()
+    assert (len(box["photos"]), len(box["items"][0]["photos"])) == (12, 12)
+    kept = store.list_photos_by_ids([photo["id"] for photo in on_box + on_item])
+    assert sorted(photo["id"] for photo in kept if photo["kept"]) == sorted(
+        photo["id"] for photo in on_box[:5] + on_item[:4]
+    )
+
+    # a new box on the tag of a deleted one starts with all its room
+    assert client.delete("/api/boxes/7").status_code == 204
+    for _ in range(12):
+        assert _upload(client, "/api/boxes/7/photos").status_code == 201
+    assert _upload(client, "/api/boxes/7/photos").status_code == 409
+
+
 def test_an_item_holds_at_most_12_photos(client):
     item = client.post("/api/boxes/7/items", json={"name": "Tent"}).json()
     other = client.post("/api/boxes/7/items", json={"name": "Tarp"}).json()
@@ -1465,45 +1531,85 @@ def test_photo_404(client):
 
 def test_delete_photo(client):
     keep = _upload(client, "/api/boxes/7/photos").json()
-    drop = _upload(client, "/api/boxes/7/photos").json()
+    drop = _upload(client, "/api/boxes/7/photos", _image("JPEG", (640, 480))).json()
+    before = _bytes(client, drop)
 
     resp = client.delete(f"/api/photos/{drop['id']}")
 
     assert resp.status_code == 204
     assert resp.content == b""
-    assert client.delete(f"/api/photos/{drop['id']}").status_code == 404
-    assert client.get(f"/api/photos/{drop['id']}").status_code == 404
-    assert client.get(f"/api/photos/{drop['id']}/thumb").status_code == 404
-    assert client.get(f"/api/photos/{keep['id']}").status_code == 200
+    # it is no longer on a box or item, so there is nothing to take off
+    again = client.delete(f"/api/photos/{drop['id']}")
+    assert again.status_code == 404
+    assert isinstance(again.json()["detail"], str)
     assert client.get("/api/boxes/7").json()["photos"] == [keep]
+    assert client.get("/api/boxes").json()[0]["photos"] == [keep]
+    # and it is kept, at the same address, byte for byte
+    assert _bytes(client, drop) == before
+    assert _opened(before[0]).size == (640, 480)
+    assert client.get(f"/api/photos/{keep['id']}").status_code == 200
 
 
-def test_photos_are_removed_with_their_box(client):
+@pytest.mark.parametrize("erase", ["0", "false"])
+def test_erase_switched_off_removes_and_keeps(client, erase):
+    photo = _upload(client, "/api/boxes/7/photos").json()
+    before = _bytes(client, photo)
+
+    assert client.delete(f"/api/photos/{photo['id']}", params={"erase": erase}).status_code == 204
+
+    assert client.get("/api/boxes/7").json()["photos"] == []
+    assert _bytes(client, photo) == before
+    assert [entry["action"] for entry in _history(client)][0] == "photo_removed"
+
+
+def test_erase_that_is_not_a_yes_or_no_is_422(client):
+    photo = _upload(client, "/api/boxes/7/photos").json()
+
+    resp = client.delete(f"/api/photos/{photo['id']}", params={"erase": "maybe"})
+
+    assert resp.status_code == 422
+    assert isinstance(resp.json()["detail"], str)
+    assert client.get("/api/boxes/7").json()["photos"] == [photo]
+
+
+def test_photos_are_kept_when_their_box_is_deleted(client):
     item = client.post("/api/boxes/7/items", json={"name": "Tent"}).json()
-    on_box = _upload(client, "/api/boxes/7/photos").json()
-    on_item = _upload(client, f"/api/items/{item['id']}/photos").json()
+    on_box = _upload(client, "/api/boxes/7/photos", _image("JPEG", (640, 480))).json()
+    on_item = _upload(client, f"/api/items/{item['id']}/photos", _image("PNG", (200, 400)), "image/png").json()
     elsewhere = _upload(client, "/api/boxes/8/photos").json()
+    before = {photo["id"]: _bytes(client, photo) for photo in (on_box, on_item, elsewhere)}
+    assert before[on_box["id"]] != before[on_item["id"]]
 
     assert client.delete("/api/boxes/7").status_code == 204
 
-    for photo in (on_box, on_item):
-        assert client.get(f"/api/photos/{photo['id']}").status_code == 404
-        assert client.get(f"/api/photos/{photo['id']}/thumb").status_code == 404
-    assert client.get(f"/api/photos/{elsewhere['id']}").status_code == 200
+    for photo in (on_box, on_item, elsewhere):
+        assert _bytes(client, photo) == before[photo["id"]]
+    assert _opened(before[on_item["id"]][0]).size == (200, 400)
+    # they are in no list of any box or item
+    boxes = client.get("/api/boxes").json()
+    assert [(box["tag_id"], box["photos"], box["items"]) for box in boxes] == [(8, [elsewhere], [])]
     # a new box on the same tag starts without them
     assert client.put("/api/boxes/7", json={"name": "Tools"}).json()["photos"] == []
+    # and neither can be taken off anything
+    for photo in (on_box, on_item):
+        assert client.delete(f"/api/photos/{photo['id']}").status_code == 404
+        assert _bytes(client, photo) == before[photo["id"]]
 
 
-def test_photos_are_removed_with_their_item(client):
+def test_photos_are_kept_when_their_item_is_deleted(client):
     item = client.post("/api/boxes/7/items", json={"name": "Tent"}).json()
     on_box = _upload(client, "/api/boxes/7/photos").json()
-    on_item = _upload(client, f"/api/items/{item['id']}/photos").json()
+    on_item = _upload(client, f"/api/items/{item['id']}/photos", _image("JPEG", (640, 480))).json()
+    before = _bytes(client, on_item)
 
     assert client.delete(f"/api/items/{item['id']}").status_code == 204
 
-    assert client.get(f"/api/photos/{on_item['id']}").status_code == 404
+    assert _bytes(client, on_item) == before
     assert client.get(f"/api/photos/{on_box['id']}").status_code == 200
-    assert client.get("/api/boxes/7").json()["photos"] == [on_box]
+    box = client.get("/api/boxes/7").json()
+    assert box["photos"] == [on_box]
+    assert box["items"] == []
+    assert client.delete(f"/api/photos/{on_item['id']}").status_code == 404
 
 
 def test_photos_are_recorded_in_history(client):
@@ -1534,34 +1640,293 @@ def test_photos_never_merge_in_history(client, clock):
     assert [entry["action"] for entry in _history(client)] == ["photo_added"] * 3 + ["box_created"]
 
 
-def test_deleting_a_box_says_how_many_photos_went(client):
+def test_deleting_a_box_lists_the_photos_that_went(client):
     client.put("/api/boxes/7", json={"name": "Camping"})
     item = client.post("/api/boxes/7/items", json={"name": "Tent"}).json()
-    for _ in range(2):
-        _upload(client, "/api/boxes/7/photos")
-    _upload(client, f"/api/items/{item['id']}/photos")
+    on_box = [_upload(client, "/api/boxes/7/photos").json() for _ in range(2)]
+    on_item = _upload(client, f"/api/items/{item['id']}/photos").json()
 
     client.delete("/api/boxes/7")
 
-    assert _history(client)[0]["changes"] == {
+    newest = _history(client)[0]
+    assert set(newest) == HISTORY_KEYS
+    assert newest["action"] == "box_deleted"
+    assert newest["changes"] == {
         "name": ["Camping", None],
         "items": [[{"name": "Tent", "qty": 1}], None],
-        # the two on the box and the one on its item
-        "photos": [3, None],
+        # the two on the box, then the one on its item
+        "photos": [[on_box[0]["id"], on_box[1]["id"], on_item["id"]], None],
     }
+    assert newest["photos"] == [_kept(on_box[0]), _kept(on_box[1]), _kept(on_item)]
+    for photo in on_box + [on_item]:
+        assert client.get(f"/api/photos/{photo['id']}").status_code == 200
 
 
-def test_removing_an_item_says_how_many_photos_went(client):
+def test_deleting_a_box_without_photos_leaves_the_key_out(client):
+    client.put("/api/boxes/7", json={"name": "Camping"})
+    client.post("/api/boxes/7/items", json={"name": "Tent"})
+
+    client.delete("/api/boxes/7")
+
+    newest = _history(client)[0]
+    assert "photos" not in newest["changes"]
+    assert newest["photos"] == []
+
+
+def test_removing_an_item_lists_the_photos_that_went(client):
     item = client.post("/api/boxes/7/items", json={"name": "Tent"}).json()
     bare = client.post("/api/boxes/7/items", json={"name": "Tarp"}).json()
-    _upload(client, "/api/boxes/7/photos")
-    for _ in range(2):
-        _upload(client, f"/api/items/{item['id']}/photos")
+    on_box = _upload(client, "/api/boxes/7/photos").json()
+    on_item = [_upload(client, f"/api/items/{item['id']}/photos").json() for _ in range(2)]
 
     client.delete(f"/api/items/{item['id']}")
     client.delete(f"/api/items/{bare['id']}")
 
     without, with_photos = _history(client)[:2]
-    assert with_photos["changes"] == {"name": ["Tent", None], "qty": [1, None], "photos": [2, None]}
-    # no photos, no count
+    assert with_photos["changes"] == {
+        "name": ["Tent", None],
+        "qty": [1, None],
+        "photos": [[on_item[0]["id"], on_item[1]["id"]], None],
+    }
+    assert with_photos["photos"] == [_kept(on_item[0]), _kept(on_item[1])]
+    # no photos, no key
     assert without["changes"] == {"name": ["Tarp", None], "qty": [1, None]}
+    assert without["photos"] == []
+    assert client.get("/api/boxes/7").json()["photos"] == [on_box]
+
+
+# --- kept photos in history ---------------------------------------------------
+
+
+def test_every_entry_carries_the_photos_it_refers_to(client):
+    client.put("/api/boxes/7", json={"name": "Camping"})
+    item = client.post("/api/boxes/7/items", json={"name": "Tent"}).json()
+    client.patch(f"/api/items/{item['id']}", json={"qty": 2})
+    stays = _upload(client, "/api/boxes/7/photos").json()
+    goes = _upload(client, f"/api/items/{item['id']}/photos").json()
+    client.delete(f"/api/photos/{goes['id']}")
+    client.put("/api/boxes/7", json={"notes": "heavy"})
+
+    entries = _history(client)
+
+    assert all(set(entry) == HISTORY_KEYS for entry in entries)
+    assert [(entry["action"], entry["photos"]) for entry in entries] == [
+        ("box_updated", []),
+        ("photo_removed", [_kept(goes)]),
+        # the entry that added it says the same: the photo is kept now
+        ("photo_added", [_kept(goes)]),
+        ("photo_added", [_live(stays)]),
+        ("item_updated", []),
+        ("item_added", []),
+        ("box_created", []),
+    ]
+    assert _history(client, tag_id=7) == entries
+    assert _history(client, limit=2, before=entries[1]["at"]) == entries[2:4]
+    # what a photo is, never the image itself
+    body = client.get("/api/history").content
+    assert b'"data"' not in body
+    assert b'"thumb"' not in body
+
+
+def test_an_entry_from_before_photos_were_kept_holds_a_count(client, store):
+    live = _upload(client, "/api/boxes/7/photos").json()
+    old = {
+        "id": str(uuid.uuid4()),
+        "at": "2025-06-01T10:00:00.000000+00:00",
+        "actor": "alice",
+        "action": "box_deleted",
+        "tag_id": 9,
+        "box_id": str(uuid.uuid4()),
+        "box_name": "Old box",
+        "item_id": None,
+        "item_name": "",
+        "changes": {"name": ["Old box", None], "items": [[], None], "photos": [3, None]},
+    }
+    older = {
+        **old,
+        "id": str(uuid.uuid4()),
+        "at": "2025-06-01T09:00:00.000000+00:00",
+        "action": "item_removed",
+        "item_id": str(uuid.uuid4()),
+        "item_name": "Tent",
+        "changes": {"name": ["Tent", None], "qty": [1, None], "photos": [1, None]},
+    }
+    store.add_history(old)
+    store.add_history(older)
+
+    assert _history(client, tag_id=9) == [{**old, "photos": []}, {**older, "photos": []}]
+    # and it sits in a page next to entries that do refer to photos
+    everything = _history(client)
+    assert [entry["action"] for entry in everything] == ["photo_added", "box_created", "box_deleted", "item_removed"]
+    assert [entry["photos"] for entry in everything] == [[_live(live)], [], [], []]
+
+
+class CountsPhotoLookups(SqliteStore):
+    lookups: list[list[str]] = []
+
+    def list_photos_by_ids(self, photo_ids):
+        self.lookups.append(list(photo_ids))
+        return super().list_photos_by_ids(photo_ids)
+
+
+def test_the_photos_of_a_page_are_fetched_in_one_go(tmp_path):
+    store = CountsPhotoLookups(tmp_path / "scannage.db")
+    store.lookups = []
+    store.apply_schema()
+    store.set_meta(samples.META_KEY, "set by the test")
+    stores.set_store(store)
+    try:
+        with TestClient(main.app) as client:
+            client.put("/api/boxes/8", json={"name": "Tools"})
+            assert [entry["photos"] for entry in _history(client)] == [[]]
+            # no entry refers to a photo, so the store is not asked for any
+            assert store.lookups == []
+
+            item = client.post("/api/boxes/7/items", json={"name": "Tent"}).json()
+            on_box = [_upload(client, "/api/boxes/7/photos").json() for _ in range(3)]
+            on_item = [_upload(client, f"/api/items/{item['id']}/photos").json() for _ in range(2)]
+            client.delete(f"/api/photos/{on_box[0]['id']}")
+            client.delete("/api/boxes/7")
+            entries = _history(client)
+    finally:
+        stores.set_store(None)
+
+    ids = [photo["id"] for photo in on_box + on_item]
+    assert len(entries) == 10
+    assert len(store.lookups) == 1
+    assert sorted(set(store.lookups[0])) == sorted(ids)
+    assert [photo["id"] for photo in entries[0]["photos"]] == ids[1:]
+    assert {photo["kept"] for entry in entries for photo in entry["photos"]} == {True}
+
+
+# --- erasing a kept photo -----------------------------------------------------
+
+
+def test_erase_a_kept_photo(client, clock):
+    client.put("/api/boxes/7", json={"name": "Camping"}, headers={"Remote-User": "alice"})
+    stays = _upload(client, "/api/boxes/7/photos").json()
+    goes = _upload(client, "/api/boxes/7/photos").json()
+    client.delete("/api/boxes/7")
+    before = _history(client)
+    assert before[0]["photos"] == [_kept(stays), _kept(goes)]
+
+    resp = client.delete(f"/api/photos/{goes['id']}", params={"erase": 1}, headers={"Remote-User": "bob"})
+
+    assert resp.status_code == 204
+    assert resp.content == b""
+    for path in (f"/api/photos/{goes['id']}", f"/api/photos/{goes['id']}/thumb"):
+        gone = client.get(path)
+        assert gone.status_code == 404
+        assert isinstance(gone.json()["detail"], str)
+    assert client.get(f"/api/photos/{stays['id']}").status_code == 200
+
+    erased, deleted, *earlier = _history(client)
+    assert erased == {
+        "id": erased["id"],
+        "at": "2026-01-01T00:00:05.000000+00:00",
+        "actor": "bob",
+        "action": "photo_erased",
+        "tag_id": 7,
+        "box_id": goes["box_id"],
+        "box_name": "Camping",
+        "item_id": None,
+        "item_name": "",
+        "changes": {"photo": [goes["id"], None]},
+        "photos": [],
+    }
+    # the entries that referred to it keep their ids and no longer offer the photo
+    assert deleted["changes"]["photos"] == [[stays["id"], goes["id"]], None]
+    assert deleted["photos"] == [_kept(stays)]
+    assert [(entry["action"], entry["photos"]) for entry in earlier] == [
+        ("photo_added", []),
+        ("photo_added", [_kept(stays)]),
+        ("box_created", []),
+    ]
+    assert [entry["changes"] for entry in earlier] == [entry["changes"] for entry in before[1:]]
+
+    # there is nothing left to erase or to take off
+    assert client.delete(f"/api/photos/{goes['id']}", params={"erase": 1}).status_code == 404
+    assert client.delete(f"/api/photos/{goes['id']}").status_code == 404
+    assert len(_history(client)) == len(before) + 1
+
+
+def test_erase_a_photo_of_an_item_that_is_gone(client):
+    client.put("/api/boxes/7", json={"name": "Camping"})
+    item = client.post("/api/boxes/7/items", json={"name": "Tent"}).json()
+    photo = _upload(client, f"/api/items/{item['id']}/photos").json()
+    client.patch(f"/api/items/{item['id']}", json={"name": "Tent, 4 person"})
+    client.delete(f"/api/items/{item['id']}")
+    client.put("/api/boxes/7", json={"name": "Camping gear"})
+
+    assert client.delete(f"/api/photos/{photo['id']}", params={"erase": "true"}).status_code == 204
+
+    erased = _history(client)[0]
+    assert (erased["action"], erased["tag_id"], erased["box_id"]) == ("photo_erased", 7, item["box_id"])
+    assert (erased["box_name"], erased["item_id"]) == ("Camping gear", item["id"])
+    assert erased["item_name"] == "Tent, 4 person"
+    assert erased["changes"] == {"photo": [photo["id"], None]}
+    assert client.get(f"/api/photos/{photo['id']}").status_code == 404
+    # the box it was on is not touched
+    assert client.get("/api/boxes/7").json()["name"] == "Camping gear"
+
+
+def test_erase_a_photo_that_is_still_in_use_is_409(client):
+    item = client.post("/api/boxes/7/items", json={"name": "Tent"}).json()
+    on_box = _upload(client, "/api/boxes/7/photos").json()
+    on_item = _upload(client, f"/api/items/{item['id']}/photos").json()
+    served = {photo["id"]: _bytes(client, photo) for photo in (on_box, on_item)}
+    before = _history(client)
+
+    for photo in (on_box, on_item):
+        resp = client.delete(f"/api/photos/{photo['id']}", params={"erase": 1})
+
+        assert resp.status_code == 409
+        assert isinstance(resp.json()["detail"], str)
+        assert _bytes(client, photo) == served[photo["id"]]
+    box = client.get("/api/boxes/7").json()
+    assert box["photos"] == [on_box]
+    assert box["items"][0]["photos"] == [on_item]
+    assert _history(client) == before
+
+    # taken off first, it can be erased
+    assert client.delete(f"/api/photos/{on_box['id']}").status_code == 204
+    assert client.delete(f"/api/photos/{on_box['id']}", params={"erase": 1}).status_code == 204
+    assert client.get(f"/api/photos/{on_box['id']}").status_code == 404
+    assert [entry["action"] for entry in _history(client)][:2] == ["photo_erased", "photo_removed"]
+
+
+def test_erase_an_unknown_photo_is_404(client):
+    kept = _upload(client, "/api/boxes/7/photos").json()
+    client.delete(f"/api/photos/{kept['id']}")
+    before = _history(client)
+
+    for photo_id in (str(uuid.uuid4()), "not-a-uuid"):
+        resp = client.delete(f"/api/photos/{photo_id}", params={"erase": 1})
+
+        assert resp.status_code == 404
+        assert isinstance(resp.json()["detail"], str)
+    assert _history(client) == before
+    assert client.get(f"/api/photos/{kept['id']}").status_code == 200
+
+
+def test_only_erase_ever_deletes_a_photo(client, store):
+    item = client.post("/api/boxes/7/items", json={"name": "Tent"}).json()
+    added = [_upload(client, "/api/boxes/7/photos").json() for _ in range(3)]
+    added += [_upload(client, f"/api/items/{item['id']}/photos").json() for _ in range(2)]
+    other = client.post("/api/boxes/7/items", json={"name": "Tarp"}).json()
+    added.append(_upload(client, f"/api/items/{other['id']}/photos").json())
+    ids = [photo["id"] for photo in added]
+
+    client.delete(f"/api/photos/{added[0]['id']}")
+    client.delete(f"/api/photos/{added[3]['id']}")
+    client.delete(f"/api/items/{other['id']}")
+    client.delete("/api/boxes/7")
+    client.put("/api/boxes/7", json={"name": "Tools"})
+    client.delete("/api/boxes/7")
+
+    assert sorted(photo["id"] for photo in store.list_photos_by_ids(ids)) == sorted(ids)
+    assert all(client.get(f"/api/photos/{photo_id}").status_code == 200 for photo_id in ids)
+
+    assert client.delete(f"/api/photos/{ids[2]}", params={"erase": 1}).status_code == 204
+
+    assert sorted(photo["id"] for photo in store.list_photos_by_ids(ids)) == sorted(ids[:2] + ids[3:])

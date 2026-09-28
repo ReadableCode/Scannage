@@ -119,9 +119,13 @@
     addItemPhoto: function (itemId, bytes, type) {
       return request('POST', '/api/items/' + encodeURIComponent(itemId) + '/photos', bytes, type);
     },
-    // a photo that is already gone counts as removed
+    // a photo that is already gone counts as removed. It leaves the box or item and is kept.
     deletePhoto: function (photoId) {
       return request('DELETE', '/api/photos/' + encodeURIComponent(photoId)).catch(missingIsNull);
+    },
+    // for good, and only for a kept photo. One that is already gone counts as erased.
+    erasePhoto: function (photoId) {
+      return request('DELETE', '/api/photos/' + encodeURIComponent(photoId) + '?erase=1').catch(missingIsNull);
     },
 
     // newest first. tag and before are optional, before is the 'at' of the last entry already held

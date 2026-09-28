@@ -144,8 +144,13 @@ reached, the app reports it and does not switch to SQLite.
 A box and each item in it can carry up to 12 photos. The app turns a photo
 upright, scales it down to 1600 pixels on the long edge and stores it as a
 JPEG inside the database, next to a small thumbnail. Everything else the
-file carried is removed, the location it was taken at included. Photos go
-when their box or item is deleted.
+file carried is removed, the location it was taken at included.
+
+A photo is never lost by accident. Taking a photo off, or deleting its box or
+item, takes it out of the inventory and keeps it in the database. It stays
+reachable from the history entry of that change. Erasing a kept photo for
+good is its own deliberate step, taken from history, and is recorded there.
+Kept photos do not count towards the 12.
 
 ## History
 
@@ -163,8 +168,10 @@ uv run pytest tests/test_sqlite_store.py tests/test_api.py tests/test_tls.py tes
 `tests/test_db_real.py` and `tests/test_postgrest_real.py` run against a real
 Postgres and PostgREST taken from the environment. They fail, rather than
 skip, when those cannot be reached. They use negative tag numbers, which no
-printed tag can have, and remove the boxes they create. The history entries
-they write stay, as all history does, and the API never returns them.
+printed tag can have, and remove the boxes they create. The photos of those
+boxes are kept like any other, so the tests then erase them, each by its id.
+The history entries they write stay, as all history does, and the API never
+returns them.
 
 ## Layout
 

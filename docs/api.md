@@ -66,10 +66,10 @@ item `name` 1 to 120, `qty` 1 to 9999. Strings are trimmed.
 | `GET /api/boxes` | | list of boxes, each with its items |
 | `GET /api/boxes/{tag_id}` | | box, or 404 |
 | `PUT /api/boxes/{tag_id}` | `{"name", "location", "notes"}`, all optional | the box, created if the tag was unclaimed |
-| `DELETE /api/boxes/{tag_id}` | | 204, or 404. Removes the box and its items and frees the tag |
+| `DELETE /api/boxes/{tag_id}` | | 204, or 404. Removes the box and its items and frees the tag. Their photos are kept |
 | `POST /api/boxes/{tag_id}/items` | `{"name", "qty"}`, `qty` defaults to 1 | the item, 201. Creates the box if the tag was unclaimed |
 | `PATCH /api/items/{item_id}` | `{"name", "qty"}`, both optional | the item, or 404 |
-| `DELETE /api/items/{item_id}` | | 204, or 404 |
+| `DELETE /api/items/{item_id}` | | 204, or 404. Its photos are kept |
 | `GET /api/qr/{tag_id}.svg` | | QR code holding `{base_url}/b/{tag_id}` |
 
 The history and photo endpoints are listed in their own sections below.
@@ -119,6 +119,9 @@ class Store(Protocol):
     def get_photo(self, photo_id: str) -> dict | None: ...
     def get_photo_data(self, photo_id: str, thumb: bool = False) -> bytes | None: ...
     def delete_photo(self, photo_id: str) -> bool: ...
+    def get_kept_photo(self, photo_id: str) -> dict | None: ...
+    def list_photos_by_ids(self, photo_ids: list[str]) -> list[dict]: ...
+    def erase_photo(self, photo_id: str) -> bool: ...
     def add_history(self, entry: dict) -> dict: ...
     def update_history(self, entry_id: str, changes: dict, at: str, box_name: str, item_name: str) -> None: ...
     def delete_history(self, entry_id: str) -> bool: ...
@@ -131,14 +134,28 @@ class Store(Protocol):
     def set_meta(self, key: str, value: str) -> None: ...
 ```
 
-`apply_schema` creates whatever tables are missing and nothing else.
+`apply_schema` creates whatever tables, columns, indexes and triggers are
+missing, and gives photos stored before `tag_id` existed the tag of their
+box. It removes nothing.
 `bootstrap` is what the app runs at startup: `apply_schema`, then the sample
 boxes when the database is new (see Sample boxes).
 
 `add_photo` takes an image that is already processed, as
 `{"width", "height", "data", "thumb"}` with the two JPEGs as bytes.
-`get_photo` returns the photo shape and `get_photo_data` the bytes of the
-image or of its thumbnail. No list ever reads the bytes.
+`get_photo` returns the photo shape of a photo that is on a box or item, and
+`None` for a kept one. `get_photo_data` returns the bytes of the image or of
+its thumbnail, kept or not. No list ever reads the bytes.
+
+`delete_photo`, `delete_item` and `delete_box` take photos off and never
+delete one: the database keeps each photo as it goes (see Kept photos).
+`get_kept_photo` returns a kept photo as the photo shape plus `tag_id`, the
+tag it was on, and `removed_at`, and `None` for a photo that is still on a box
+or item. `list_photos_by_ids` returns the photos with these ids that exist,
+on a box or item or kept, each in the photo shape plus `kept`. Ids that match
+nothing, or that are not ids, are left out. The order is not part of the
+contract. `erase_photo` deletes a kept photo and returns whether there was
+one. It never touches a photo that is on a box or item, and it is the only
+call that deletes image bytes.
 
 `update_history` and `delete_history` exist only for the merge rule under
 History. `list_history` leaves out negative tag ids unless `include_tests` is
@@ -148,6 +165,11 @@ The stores record no history themselves. `app/history.py` wraps each write:
 it reads the state before, calls the store, works out `changes` and records
 the entry. The API writes only through it. A failure to record is logged and
 the write still stands.
+
+The API reads history through it as well. `list_history` returns entries as
+they were written, without `photos`. `history.list_entries` adds `photos` to
+each: it collects the photo ids of the whole page and asks the store for them
+once, with `list_photos_by_ids`.
 
 `get_meta` and `set_meta` read and write `app_meta`, a small key/value table
 for one-time flags such as `samples_seeded`. It is not exposed by the API.
@@ -192,12 +214,16 @@ Entry:
   "box_name": "Camping",
   "item_id": "6f0a4f0e-7f7b-4a3e-8f57-0e1c6f0a9d21",
   "item_name": "Sleeping bag",
-  "changes": {"qty": [1, 2]}
+  "changes": {"qty": [1, 2]},
+  "photos": []
 }
 ```
 
 `action` is one of `box_created`, `box_updated`, `box_deleted`, `item_added`,
-`item_updated`, `item_removed`, `photo_added`, `photo_removed`.
+`item_updated`, `item_removed`, `photo_added`, `photo_removed`,
+`photo_erased`.
+
+`photos` holds the photos the entry refers to, see Kept photos.
 
 `changes` maps a field to `[before, after]`. A created thing has `null`
 before, a removed thing has `null` after. `box_deleted` also carries
@@ -217,10 +243,13 @@ What `changes` holds for each action:
 | `item_removed` | `name` and `qty`, each `[value, null]` |
 | `photo_added` | `{"photo": [null, "<photo id>"]}` |
 | `photo_removed` | `{"photo": ["<photo id>", null]}` |
+| `photo_erased` | `{"photo": ["<photo id>", null]}` |
 
-`box_deleted` and `item_removed` also carry `"photos": [<count>, null]` when
-photos went with the box or item. For a box the count covers its own photos
-and those of its items. Without photos the key is left out.
+`box_deleted` and `item_removed` also carry
+`"photos": [["<photo id>", "<photo id>"], null]` when photos went with the box
+or item. For a box the list holds its own photos first and then those of its
+items, item by item. Without photos the key is left out. An entry written
+before photos were kept holds a count in place of the list.
 
 An entry for a photo on an item carries that item's `item_id` and
 `item_name`. Adding an item or a photo to an unclaimed tag creates the box,
@@ -284,7 +313,7 @@ hold the shape above and never the image bytes.
 | `POST /api/items/{item_id}/photos` | same | the photo, 201, or 404 |
 | `GET /api/photos/{photo_id}` | | the image, `image/jpeg` |
 | `GET /api/photos/{photo_id}/thumb` | | a small version, `image/jpeg` |
-| `DELETE /api/photos/{photo_id}` | | 204, or 404 |
+| `DELETE /api/photos/{photo_id}` | | 204, or 404. The photo is kept, see Kept photos |
 
 The upload body is limited to 8 MB (413 above that). The server decodes the
 image, turns it upright, scales it down to at most 1600 pixels on the long
@@ -298,10 +327,70 @@ with them. JPEG, PNG and WebP are taken, any other format is a 422, and so is
 an image of more than 50 megapixels. A small image is never enlarged.
 Anything see-through is laid over white. `width`, `height` and `size` describe
 the stored JPEG, `size` in bytes. The 12 of a box count its own photos, not
-those of its items. A `photo_id` that matches nothing is a 404 on all three
-photo addresses.
+those of its items, and kept photos do not count. A `photo_id` that matches
+nothing is a 404 on all three photo addresses.
 
 Photos are sent with `Cache-Control: private, max-age=31536000, immutable`. A
 photo never changes once stored, so its address can be cached for good.
 
-Photos are removed with their box or item. The history entry stays.
+Photos leave the inventory with their box or item, and are kept. See Kept
+photos below.
+
+## Kept photos
+
+A photo is never lost by accident. Removing a photo, or deleting the box or
+item it belongs to, takes it out of the inventory and keeps it. A kept photo
+is in no `photos` list of a box or item. It stays at the same address, and it
+is reachable from the history entry that removed it.
+
+Every history entry gains `"photos": [...]`: the photos that entry refers to
+and that still exist, in the photo shape plus `"kept": true` or `false`.
+`kept` is `false` while the photo is still on a box or item. They come in the
+order of the ids in `changes`. `box_id` and `item_id` of a kept photo are
+those it had, of a box or item that may be gone.
+
+| Action | Photos the entry refers to |
+|---|---|
+| `photo_added`, `photo_removed` | that one photo |
+| `box_deleted` | every photo that was on the box and its items when it was deleted |
+| `item_removed` | every photo that was on the item |
+| anything else | none, an empty list |
+
+For `box_deleted` and `item_removed`, `changes.photos` is
+`[["<photo id>", "<photo id>"], null]`, the ids that went with it, and is left
+out when there were none. Entries written before this existed may hold a
+count there instead of a list; they refer to no photos.
+
+| Method and path | Returns |
+|---|---|
+| `DELETE /api/photos/{photo_id}` | 204. Takes the photo off its box or item and keeps it. 404 when it is not on a box or item |
+| `DELETE /api/photos/{photo_id}?erase=1` | 204. Erases a kept photo for good. 404 when there is no such photo, 409 when it is still on a box or item |
+
+`erase=1` or `erase=true` erases. Without `erase`, or with `0` or `false`,
+the photo is taken off and kept. A value that does not read as yes or no is a
+422.
+
+Erasing is the only way a photo leaves the database. It records a
+`photo_erased` entry with `changes` `{"photo": ["<photo id>", null]}` on the
+tag the photo belonged to. After that the photo's address answers 404 and it
+is gone from every entry's `photos` list.
+
+The `photo_erased` entry carries the `box_id` and `item_id` the photo had.
+Its `box_name` and `item_name` are the names in the newest entry of that box
+and of that item, looked for in the newest 200 entries of the tag, and empty
+when there is none. Its own `photos` list is empty. The ids in `changes` of
+the other entries stay as they were written.
+
+A kept photo does not count towards the 12 of a box or item.
+
+Kept photos live in their own table, `kept_photos`, which has the columns of
+`photos` plus `removed_at` and references nothing. A trigger on `photos`
+copies each row there before it is deleted, in the same transaction, whether
+the photo is deleted on its own or goes with its box or item. Each photo
+carries the `tag_id` of its box, filled in by a second trigger when it is
+added, because the box is already gone by the time a delete of the box reaches
+its photos. `removed_at` is written by the database. Who removed a photo is in
+the history entry.
+
+With the PostgREST store nothing is deleted until the store has seen that
+`kept_photos` is served. Until then a delete of a box, item or photo is a 502.

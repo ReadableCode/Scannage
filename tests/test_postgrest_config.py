@@ -6,7 +6,9 @@ are both local.
 
 import importlib
 import time
+import uuid
 
+import httpx
 import jwt
 import pytest
 
@@ -171,6 +173,36 @@ def test_photo_lists_never_select_the_bytes():
 
     assert columns == ["id", "box_id", "item_id", "width", "height", "size", "created_at", "created_by"]
     assert postgrest.PHOTO_SELECT["order"] == "created_at.asc,id.asc"
+
+
+def test_kept_photos_are_never_selected_with_their_bytes():
+    columns = postgrest.KEPT_PHOTO_SELECT["select"].split(",")
+
+    assert columns == [*postgrest.PHOTO_SELECT["select"].split(","), "tag_id", "removed_at"]
+    assert not {"data", "thumb"} & set(columns)
+
+
+def test_a_set_of_ids_is_split_so_no_address_grows_too_long(store):
+    ids = [str(uuid.uuid4()) for _ in range(2 * postgrest.ID_CHUNK + 5)]
+
+    filters = postgrest.id_filters(ids)
+
+    assert [len(value.split(",")) for value in filters] == [postgrest.ID_CHUNK, postgrest.ID_CHUNK, 5]
+    assert all(value.startswith("in.(") and value.endswith(")") for value in filters)
+    assert ",".join(value[4:-1] for value in filters) == ",".join(ids)
+    assert postgrest.id_filters([]) == []
+    for table in ("photos", postgrest.KEPT_PHOTOS):
+        for value in filters:
+            request = httpx.Request("GET", f"{store.url}/{table}", params={**postgrest.PHOTO_SELECT, "id": value})
+            assert len(str(request.url)) < 4000
+
+
+def test_no_ids_to_look_up_means_no_request(store):
+    # the address does not resolve, so reaching for the network would raise
+    assert store.list_photos_by_ids([]) == []
+    assert store.list_photos_by_ids(["not-a-uuid", "", None]) == []
+    assert store.get_kept_photo("not-a-uuid") is None
+    assert store.erase_photo("not-a-uuid") is False
 
 
 def test_history_is_selected_newest_first():

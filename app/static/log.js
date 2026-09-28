@@ -7,6 +7,7 @@
 
   var PAGE = 50;
   var MIN = 60000;
+  var SHOTS = 6;
 
   // ------------------------------------------------------------------ words
 
@@ -25,6 +26,20 @@
 
   function times(qty) {
     return qty > 1 ? ' x' + qty : '';
+  }
+
+  // the photos an entry refers to and that still exist. An older server sends no list.
+  function photosOf(entry) {
+    return Array.isArray(entry.photos) ? entry.photos : [];
+  }
+
+  // the photos that went with a box or an item. An entry from before photos were kept holds a count
+  // in place of the list, and those photos are gone.
+  function shots(changes) {
+    var p = pair(changes, 'photos');
+    if (!p) return '';
+    if (Array.isArray(p[0])) return p[0].length ? ', ' + count(p[0].length, 'photo') + ' kept' : '';
+    return p[0] > 0 ? ', ' + count(Number(p[0]), 'photo') : '';
   }
 
   // one changed text field of a box. words: [to a value, from one value to another, to nothing]
@@ -62,13 +77,16 @@
     var changes = entry.changes || {};
     var item = entry.item_name || 'item';
     var qty = pair(changes, 'qty');
+    var from = entry.item_name ? ' from ' + entry.item_name : '';
     switch (entry.action) {
       case 'box_updated': return boxChanges(changes);
       case 'item_added': return 'added ' + item + times(qty ? qty[1] : 1);
       case 'item_updated': return itemChanges(entry, changes);
-      case 'item_removed': return 'removed ' + item + times(qty ? qty[0] : 1);
+      case 'item_removed': return 'removed ' + item + times(qty ? qty[0] : 1) + shots(changes);
       case 'photo_added': return 'photo added' + (entry.item_name ? ' to ' + entry.item_name : '');
-      case 'photo_removed': return 'photo removed' + (entry.item_name ? ' from ' + entry.item_name : '');
+      // kept is said for as long as the photo is there to be looked at
+      case 'photo_removed': return 'photo removed' + from + (photosOf(entry).length ? ', kept' : '');
+      case 'photo_erased': return 'photo erased' + from;
       // an action this page has not heard of is shown by its name
       default: return String(entry.action || 'changed').replace(/_/g, ' ');
     }
@@ -83,7 +101,8 @@
       return {
         box: '',
         text: 'box deleted' + (name ? ': ' + name : '') +
-          (items && Array.isArray(items[0]) ? ', ' + count(items[0].length, 'item') : '')
+          (items && Array.isArray(items[0]) ? ', ' + count(items[0].length, 'item') : '') +
+          shots(entry.changes)
       };
     }
     return { box: name || 'box ' + data.pad(entry.tag_id), text: what(entry) };
@@ -135,7 +154,7 @@
   }
 
   // a list of entries inside box, with its own paging. opts.tag() names the tag to show, or null for
-  // every tag. opts.pick(entry) makes the rows buttons.
+  // every tag. opts.pick(entry) makes the rows buttons. The photos of an entry open in the viewer.
   function list(box, opts) {
     var ul = el('ul');
     var note = el('p', 'note');
@@ -154,6 +173,55 @@
     var wanted = false;
     var turn = 0;
     var drawn = '';
+    // the second line of each row on screen, its words move on as time passes
+    var marks = [];
+
+    function forget(id) {
+      entries.forEach(function (entry) {
+        if (Array.isArray(entry.photos)) entry.photos = entry.photos.filter(function (p) { return p.id !== id; });
+      });
+    }
+
+    // a photo that was already gone counts as erased
+    function erase(photo) {
+      return api.erasePhoto(photo.id).then(function () {
+        forget(photo.id);
+        render();
+        // every list catches up from here, and gains the entry that says so
+        data.refresh();
+      }, function (err) {
+        if (err && (err.kind === 'session' || err.kind === 'network')) data.fail(err);
+        throw err;
+      });
+    }
+
+    function look(entry, at) {
+      app.photos.view({
+        list: photosOf(entry),
+        at: at,
+        title: entry.item_name || entry.box_name || '',
+        erase: erase
+      });
+    }
+
+    // beside the row and not inside it, so a tap on a photo opens the photo and not the box
+    function strip(entry, list) {
+      var div = el('div', 'thumbs');
+      list.slice(0, SHOTS).forEach(function (photo, i) {
+        var b = el('button', 'thumb');
+        b.type = 'button';
+        b.title = 'photo ' + (i + 1) + ' of ' + list.length;
+        b.setAttribute('aria-label', b.title);
+        b.appendChild(app.photos.thumb(photo, true));
+        b.addEventListener('click', function (e) {
+          e.stopPropagation();
+          look(entry, i);
+        });
+        div.appendChild(b);
+      });
+      if (list.length > SHOTS) div.appendChild(el('span', 'rest', '+ ' + (list.length - SHOTS) + ' more'));
+      return div;
+    }
 
     function row(entry, now) {
       var li = document.createElement('li');
@@ -175,17 +243,27 @@
       body.appendChild(first);
       body.appendChild(second);
       li.appendChild(body);
+      marks.push(second);
+      var list = photosOf(entry);
+      if (list.length) li.appendChild(strip(entry, list));
       return li;
     }
 
     function render() {
       var now = new Date();
       // a refresh that brings nothing new leaves the rows alone, a redraw under a finger loses the tap
-      var next = JSON.stringify(entries.map(function (e) { return [e, meta(e, now).text]; }));
+      // and loads the photos again. How long ago is written into the rows that are there.
+      var next = JSON.stringify(entries);
       if (next !== drawn) {
         drawn = next;
         ul.textContent = '';
+        marks = [];
         entries.forEach(function (entry) { ul.appendChild(row(entry, now)); });
+      } else {
+        entries.forEach(function (entry, i) {
+          var m = meta(entry, now);
+          if (marks[i].textContent !== m.text) marks[i].textContent = m.text;
+        });
       }
 
       var text = '';

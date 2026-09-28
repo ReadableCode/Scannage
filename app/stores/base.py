@@ -9,12 +9,15 @@ from __future__ import annotations
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
+from itertools import batched
 from typing import Protocol
 
 BOX_FIELDS = ("name", "location", "notes")
 ITEM_FIELDS = ("name", "qty")
 # Everything about a photo except the image bytes, which never ride along in a list.
 PHOTO_KEYS = ("id", "box_id", "item_id", "width", "height", "size", "created_at", "created_by")
+# A kept photo also says which tag it was on and when it left the inventory.
+KEPT_PHOTO_KEYS = (*PHOTO_KEYS, "tag_id", "removed_at")
 HISTORY_KEYS = ("id", "at", "actor", "action", "tag_id", "box_id", "box_name", "item_id", "item_name", "changes")
 
 
@@ -44,6 +47,9 @@ class Store(Protocol):
     def get_photo(self, photo_id: str) -> dict | None: ...
     def get_photo_data(self, photo_id: str, thumb: bool = False) -> bytes | None: ...
     def delete_photo(self, photo_id: str) -> bool: ...
+    def get_kept_photo(self, photo_id: str) -> dict | None: ...
+    def list_photos_by_ids(self, photo_ids: list[str]) -> list[dict]: ...
+    def erase_photo(self, photo_id: str) -> bool: ...
     def add_history(self, entry: dict) -> dict: ...
     def update_history(self, entry_id: str, changes: dict, at: str, box_name: str, item_name: str) -> None: ...
     def delete_history(self, entry_id: str) -> bool: ...
@@ -89,6 +95,16 @@ def clean_uuid(value: str) -> str | None:
         return str(uuid.UUID(str(value)))
     except ValueError:
         return None
+
+
+def clean_uuids(values: list) -> list[str]:
+    """Canonical ids, each one once, in the order given. Whatever cannot be an id is left out."""
+    cleaned = (clean_uuid(value) for value in values)
+    return list(dict.fromkeys(value for value in cleaned if value is not None))
+
+
+def chunks(values: list[str], size: int) -> list[list[str]]:
+    return [list(batch) for batch in batched(values, size)]
 
 
 def pick(fields: dict, allowed: tuple[str, ...]) -> dict:

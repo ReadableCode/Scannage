@@ -3,6 +3,9 @@
 Each function reads the state before, does the write through the store, works
 out what changed and records it. Recording is best effort: when it fails the
 write still stands and the failure is logged.
+
+Reading goes through here too: list_entries hangs on each entry the photos it
+refers to.
 """
 
 from __future__ import annotations
@@ -17,6 +20,8 @@ log = logging.getLogger("scannage.history")
 
 MERGE_SECONDS = 120
 MERGE_KEYS = ("action", "box_id", "item_id", "actor")
+# How far back on a tag the names of a box and item that are gone are looked for.
+NAME_LOOKBACK = 200
 
 # Where entries get their time. Tests replace it to move time without sleeping.
 clock: Callable[[], str] = utc_now
@@ -47,12 +52,17 @@ def _changed(before: dict, after: dict, fields: tuple[str, ...]) -> dict:
     return {field: [before[field], after[field]] for field in fields if before[field] != after[field]}
 
 
-def _photo_count(box: dict) -> int:
-    return len(box["photos"]) + sum(len(item["photos"]) for item in box["items"])
+def _ids(photos: list[dict]) -> list[str]:
+    return [photo["id"] for photo in photos]
 
 
-def _with_photos(changes: dict, count: int) -> dict:
-    return {**changes, "photos": [count, None]} if count > 0 else changes
+def _box_photo_ids(box: dict) -> list[str]:
+    """Its own photos, then those of its items."""
+    return _ids(box["photos"]) + [photo_id for item in box["items"] for photo_id in _ids(item["photos"])]
+
+
+def _with_photos(changes: dict, photo_ids: list[str]) -> dict:
+    return {**changes, "photos": [photo_ids, None]} if photo_ids else changes
 
 
 # --- recording ----------------------------------------------------------------
@@ -126,7 +136,7 @@ def put_box(store: Store, tag_id: int, fields: dict, actor: str) -> dict:
 def _box_deleted(store: Store, before: dict, actor: str) -> None:
     items = [{"name": item["name"], "qty": item["qty"]} for item in before["items"]]
     changes = {**_removed(before, BOX_FIELDS), "items": [items, None]}
-    _record(store, "box_deleted", before, None, _with_photos(changes, _photo_count(before)), actor)
+    _record(store, "box_deleted", before, None, _with_photos(changes, _box_photo_ids(before)), actor)
 
 
 def delete_box(store: Store, tag_id: int, actor: str) -> bool:
@@ -180,7 +190,7 @@ def delete_item(store: Store, item_id: str, actor: str) -> bool:
     before = _safely("reading the item", store.get_item, item_id)
     deleted = store.delete_item(item_id)
     if deleted and before is not _FAILED and before is not None:
-        changes = _with_photos(_removed(before, ITEM_FIELDS), len(before["photos"]))
+        changes = _with_photos(_removed(before, ITEM_FIELDS), _ids(before["photos"]))
         _safely("recording a removed item", _item_written, store, "item_removed", before, changes, actor)
     return deleted
 
@@ -211,3 +221,66 @@ def delete_photo(store: Store, photo_id: str, actor: str) -> bool:
         changes = {"photo": [before["id"], None]}
         _safely("recording a removed photo", _photo_written, store, "photo_removed", before, changes, actor)
     return deleted
+
+
+def _last_name(entries: list[dict], key: str, value: str | None, name: str) -> str:
+    if value is None:
+        return ""
+    return next((entry[name] for entry in entries if entry[key] == value), "")
+
+
+def _photo_erased(store: Store, kept: dict, actor: str) -> None:
+    if kept["tag_id"] is None:
+        log.warning("history: photo %s was kept without its tag, so erasing it is not recorded", kept["id"])
+        return
+    # its box or item may be long gone, and their newest entries still say what they were called
+    entries = store.list_history(kept["tag_id"], NAME_LOOKBACK, None, include_tests=True)
+    box = {
+        "id": kept["box_id"],
+        "tag_id": kept["tag_id"],
+        "name": _last_name(entries, "box_id", kept["box_id"], "box_name"),
+    }
+    item = None
+    if kept["item_id"] is not None:
+        item = {"id": kept["item_id"], "name": _last_name(entries, "item_id", kept["item_id"], "item_name")}
+    _record(store, "photo_erased", box, item, {"photo": [kept["id"], None]}, actor)
+
+
+def erase_photo(store: Store, photo_id: str, actor: str) -> bool:
+    """Erases a kept photo for good. The caller has made sure it is not on a box or item."""
+    before = _safely("reading the kept photo", store.get_kept_photo, photo_id)
+    erased = store.erase_photo(photo_id)
+    if erased and before is not _FAILED and before is not None:
+        _safely("recording an erased photo", _photo_erased, store, before, actor)
+    return erased
+
+
+# --- reading ------------------------------------------------------------------
+
+
+def _photo_ids(entry: dict) -> list[str]:
+    """The photos an entry refers to. One written before photos were kept holds a count, and refers to none."""
+    changes = entry["changes"]
+    if entry["action"] in ("photo_added", "photo_removed"):
+        listed = changes.get("photo")
+    elif entry["action"] in ("box_deleted", "item_removed"):
+        pair = changes.get("photos")
+        listed = pair[0] if isinstance(pair, list) and pair else None
+    else:
+        return []
+    return [value for value in listed if isinstance(value, str)] if isinstance(listed, list) else []
+
+
+def list_entries(
+    store: Store, tag_id: int | None, limit: int, before: str | None, include_tests: bool = False
+) -> list[dict]:
+    """A page of entries, each with the photos it refers to that still exist."""
+    entries = store.list_history(tag_id, limit, before, include_tests)
+    referred = [_photo_ids(entry) for entry in entries]
+    wanted = [photo_id for photo_ids in referred for photo_id in photo_ids]
+    # every photo of the page in one go, never entry by entry
+    found = {photo["id"]: photo for photo in store.list_photos_by_ids(wanted)} if wanted else {}
+    return [
+        {**entry, "photos": [found[photo_id] for photo_id in photo_ids if photo_id in found]}
+        for entry, photo_ids in zip(entries, referred)
+    ]

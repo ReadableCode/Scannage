@@ -9,11 +9,28 @@
   var MAX_PHOTOS = 12;
   var TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
+  // the two ways a photo goes. Removing takes it off its box or item and keeps it, erasing ends it.
+  var REMOVE = {
+    key: 'remove',
+    name: 'remove photo',
+    ask: 'remove this photo? it is kept and can be found in history.',
+    yes: 'remove',
+    failed: 'the photo was not removed'
+  };
+  var ERASE = {
+    key: 'erase',
+    name: 'erase for good',
+    ask: 'erase this photo for good? this cannot be undone.',
+    yes: 'erase',
+    failed: 'the photo was not erased'
+  };
+
   var fileEl = document.getElementById('photoFile');
   var viewer = document.getElementById('viewer');
   var countEl = document.getElementById('viewerCount');
   var stageEl = document.getElementById('viewerStage');
   var imgEl = document.getElementById('viewerImg');
+  var keptEl = document.getElementById('viewerKept');
   var noteEl = document.getElementById('viewerNote');
   var barEl = document.getElementById('viewerBar');
   var prevBtn = document.getElementById('viewerPrev');
@@ -21,6 +38,7 @@
   var addBtn = document.getElementById('viewerAdd');
   var removeBtn = document.getElementById('viewerRemove');
   var confirmEl = document.getElementById('viewerConfirm');
+  var askEl = document.getElementById('viewerAsk');
   var yesBtn = document.getElementById('viewerYes');
   var noBtn = document.getElementById('viewerNo');
 
@@ -136,29 +154,49 @@
 
   function asking(on) {
     confirmEl.hidden = !on;
-    barEl.hidden = on;
+    barEl.hidden = on || !show || !show.bar;
+  }
+
+  // a kept photo can only be erased, one that is still on a box or item can only be removed.
+  // Null when the place the photo was opened from offers neither.
+  function way(photo) {
+    if (photo.kept) return show.erase ? ERASE : null;
+    return show.remove ? REMOVE : null;
   }
 
   function draw() {
     var photo = show.list[show.at];
     var many = show.list.length > 1;
+    var w = way(photo);
     imgEl.src = api.photoUrl(photo.id);
     countEl.textContent = 'photo ' + (show.at + 1) + ' of ' + show.list.length + (show.title ? ' | ' + show.title : '');
     prevBtn.hidden = nextBtn.hidden = !many;
     addBtn.hidden = !show.add;
+    removeBtn.hidden = !w;
+    if (w) {
+      removeBtn.textContent = w.name;
+      askEl.textContent = w.ask;
+      yesBtn.textContent = w.yes;
+    }
+    keptEl.hidden = !photo.kept;
+    // nothing to press under a single photo that can only be looked at
+    show.bar = many || !!w;
     noteEl.hidden = true;
     asking(false);
   }
 
-  // opts: list, at, title, remove(photo) that returns a promise, and add() when more can be added from here
+  // opts: list, at, title, remove(photo) and erase(photo) that each return a promise, and add() when
+  // more can be added from here. Without remove and erase the photos can only be looked at.
   function view(opts) {
     if (!opts.list.length) return;
     show = {
       list: opts.list.slice(),
       at: Math.min(Math.max(opts.at || 0, 0), opts.list.length - 1),
       title: opts.title || '',
-      remove: opts.remove,
-      add: opts.add || null
+      remove: opts.remove || null,
+      erase: opts.erase || null,
+      add: opts.add || null,
+      bar: true
     };
     yesBtn.disabled = false;
     viewer.hidden = false;
@@ -182,8 +220,10 @@
     var s = show;
     if (!s) return;
     var photo = s.list[s.at];
+    var w = way(photo);
+    if (!w) return;
     yesBtn.disabled = true;
-    s.remove(photo).then(function () {
+    s[w.key](photo).then(function () {
       yesBtn.disabled = false;
       if (s !== show) return;
       s.list.splice(s.list.indexOf(photo), 1);
@@ -197,7 +237,8 @@
       yesBtn.disabled = false;
       if (s !== show) return;
       asking(false);
-      noteEl.textContent = (err && err.message) || 'the photo was not removed';
+      if (w === ERASE && err && err.status === 409) noteEl.textContent = 'this photo is still in use';
+      else noteEl.textContent = (err && err.message) || w.failed;
       noteEl.hidden = false;
     });
   }

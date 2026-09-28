@@ -17,10 +17,13 @@ from .base import (
     BOX_FIELDS,
     HISTORY_KEYS,
     ITEM_FIELDS,
+    KEPT_PHOTO_KEYS,
     PHOTO_KEYS,
     StoreError,
     attach_photos,
+    chunks,
     clean_uuid,
+    clean_uuids,
     new_id,
     pick,
     utc_now,
@@ -91,11 +94,67 @@ CREATE TABLE IF NOT EXISTS photos (
 CREATE INDEX IF NOT EXISTS photos_box_id_idx ON photos (box_id);
 
 CREATE INDEX IF NOT EXISTS photos_item_id_idx ON photos (item_id);
+
+-- A photo that left the inventory. It references nothing, so no delete of a
+-- box or an item can reach it.
+CREATE TABLE IF NOT EXISTS kept_photos (
+    id         TEXT PRIMARY KEY,
+    box_id     TEXT NOT NULL,
+    item_id    TEXT,
+    width      INTEGER NOT NULL,
+    height     INTEGER NOT NULL,
+    size       INTEGER NOT NULL,
+    data       BLOB NOT NULL,
+    thumb      BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT '',
+    tag_id     INTEGER,
+    removed_at TEXT NOT NULL
+);
+"""
+
+# SQLite has no ADD COLUMN IF NOT EXISTS, so apply_schema looks before it adds.
+# The tag rides on the photo because its box is already gone when a delete of
+# the box reaches the photo.
+PHOTO_TAG_COLUMN = "ALTER TABLE photos ADD COLUMN tag_id INTEGER"
+
+# Each trigger is one statement with semicolons inside, so they are kept apart
+# from SCHEMA, which is split on them.
+TRIGGERS = (
+    """
+CREATE TRIGGER IF NOT EXISTS photos_fill_tag_id AFTER INSERT ON photos
+WHEN NEW.tag_id IS NULL
+BEGIN
+    UPDATE photos SET tag_id = (SELECT tag_id FROM boxes WHERE id = NEW.box_id) WHERE id = NEW.id;
+END
+""",
+    # Runs for a photo deleted on its own and for one deleted with its box or
+    # item, inside the same transaction, so a photo cannot go without being kept.
+    """
+CREATE TRIGGER IF NOT EXISTS photos_keep BEFORE DELETE ON photos
+BEGIN
+    INSERT INTO kept_photos (
+        id, box_id, item_id, width, height, size, data, thumb, created_at, created_by, tag_id, removed_at
+    ) VALUES (
+        OLD.id, OLD.box_id, OLD.item_id, OLD.width, OLD.height, OLD.size, OLD.data, OLD.thumb,
+        OLD.created_at, OLD.created_by, OLD.tag_id, strftime('%Y-%m-%dT%H:%M:%f000+00:00', 'now')
+    );
+END
+""",
+)
+
+# Photos stored before the column existed. Only rows without a tag are touched.
+FILL_PHOTO_TAGS = """
+UPDATE photos SET tag_id = (SELECT tag_id FROM boxes WHERE id = photos.box_id) WHERE tag_id IS NULL
 """
 
 BOX_COLUMNS = "id, tag_id, name, location, notes, created_at, updated_at, updated_by"
 ITEM_COLUMNS = "id, box_id, name, qty, created_at, updated_at"
 PHOTO_COLUMNS = ", ".join(PHOTO_KEYS)
+KEPT_PHOTO_COLUMNS = ", ".join(KEPT_PHOTO_KEYS)
+KEPT_PHOTOS = "kept_photos"
+# SQLite takes a limited number of values in one statement.
+ID_CHUNK = 500
 HISTORY_COLUMNS = ", ".join(HISTORY_KEYS)
 
 
@@ -139,6 +198,11 @@ class SqliteStore:
             for statement in SCHEMA.split(";"):
                 if statement.strip():
                     conn.execute(statement)
+            if "tag_id" not in {row["name"] for row in conn.execute("PRAGMA table_info(photos)")}:
+                conn.execute(PHOTO_TAG_COLUMN)
+            for trigger in TRIGGERS:
+                conn.execute(trigger)
+            conn.execute(FILL_PHOTO_TAGS)
         return True
 
     def health(self) -> tuple[bool, str]:
@@ -224,7 +288,7 @@ class SqliteStore:
 
     def delete_box(self, tag_id: int) -> bool:
         with self._tx(write=True) as conn:
-            # items and photos go with it through ON DELETE CASCADE
+            # items and photos go with it through ON DELETE CASCADE, and the trigger keeps each photo
             return conn.execute("DELETE FROM boxes WHERE tag_id = ?", (tag_id,)).rowcount > 0
 
     # --- items ----------------------------------------------------------------
@@ -275,7 +339,7 @@ class SqliteStore:
         if clean_id is None:
             return False
         with self._tx(write=True) as conn:
-            # its photos go with it through ON DELETE CASCADE
+            # its photos go with it through ON DELETE CASCADE, and the trigger keeps each one
             return conn.execute("DELETE FROM items WHERE id = ?", (clean_id,)).rowcount > 0
 
     # --- photos ---------------------------------------------------------------
@@ -314,15 +378,49 @@ class SqliteStore:
             return None
         column = "thumb" if thumb else "data"
         with self._tx() as conn:
-            row = conn.execute(f"SELECT {column} FROM photos WHERE id = ?", (clean_id,)).fetchone()
-        return bytes(row[column]) if row is not None else None
+            # a kept photo is served from the same address as before
+            for table in ("photos", KEPT_PHOTOS):
+                row = conn.execute(f"SELECT {column} FROM {table} WHERE id = ?", (clean_id,)).fetchone()
+                if row is not None:
+                    return bytes(row[column])
+        return None
 
     def delete_photo(self, photo_id: str) -> bool:
         clean_id = clean_uuid(photo_id)
         if clean_id is None:
             return False
         with self._tx(write=True) as conn:
+            # the trigger keeps it
             return conn.execute("DELETE FROM photos WHERE id = ?", (clean_id,)).rowcount > 0
+
+    def get_kept_photo(self, photo_id: str) -> dict | None:
+        clean_id = clean_uuid(photo_id)
+        if clean_id is None:
+            return None
+        with self._tx() as conn:
+            row = conn.execute(f"SELECT {KEPT_PHOTO_COLUMNS} FROM kept_photos WHERE id = ?", (clean_id,)).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_photos_by_ids(self, photo_ids: list[str]) -> list[dict]:
+        wanted = clean_uuids(photo_ids)
+        found: list[dict] = []
+        with self._tx() as conn:
+            for table in ("photos", KEPT_PHOTOS):
+                for chunk in chunks(wanted, ID_CHUNK):
+                    marks = ", ".join("?" * len(chunk))
+                    rows = conn.execute(
+                        f"SELECT {PHOTO_COLUMNS} FROM {table} WHERE id IN ({marks}) ORDER BY created_at, id", chunk
+                    )
+                    found.extend({**dict(row), "kept": table == KEPT_PHOTOS} for row in rows)
+        return found
+
+    def erase_photo(self, photo_id: str) -> bool:
+        clean_id = clean_uuid(photo_id)
+        if clean_id is None:
+            return False
+        with self._tx(write=True) as conn:
+            # the one place image bytes are deleted, and only ever those of a kept photo
+            return conn.execute("DELETE FROM kept_photos WHERE id = ?", (clean_id,)).rowcount > 0
 
     # --- history --------------------------------------------------------------
 

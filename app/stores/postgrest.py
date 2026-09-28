@@ -18,10 +18,13 @@ from .base import (
     BOX_FIELDS,
     HISTORY_KEYS,
     ITEM_FIELDS,
+    KEPT_PHOTO_KEYS,
     PHOTO_KEYS,
     StoreError,
     attach_photos,
+    chunks,
     clean_uuid,
+    clean_uuids,
     new_id,
     normalize_timestamp,
     pick,
@@ -42,6 +45,10 @@ BOX_SELECT = {
 }
 # Never data or thumb: photos are listed without their bytes and merged in here.
 PHOTO_SELECT = {"select": ",".join(PHOTO_KEYS), "order": "created_at.asc,id.asc"}
+KEPT_PHOTO_SELECT = {"select": ",".join(KEPT_PHOTO_KEYS)}
+KEPT_PHOTOS = "kept_photos"
+# Ids per request when filtering by a set of them, which keeps the address under about 4000 characters.
+ID_CHUNK = 80
 HISTORY_SELECT = {"select": ",".join(HISTORY_KEYS), "order": "at.desc,id.desc"}
 
 # Re-mint this long before expiry so a token never lapses mid-request.
@@ -66,12 +73,21 @@ def _shape_photo(row: dict) -> dict:
     return _shape(row, PHOTO_KEYS, ("created_at",))
 
 
+def _shape_kept_photo(row: dict) -> dict:
+    return _shape(row, KEPT_PHOTO_KEYS, ("created_at", "removed_at"))
+
+
 def _shape_entry(row: dict) -> dict:
     return _shape(row, HISTORY_KEYS, ("at",))
 
 
 def to_bytea(value: bytes) -> str:
     return BYTEA_PREFIX + value.hex()
+
+
+def id_filters(ids: list[str]) -> list[str]:
+    """The filter values that ask for a set of ids, split so that no request grows too long."""
+    return [f"in.({','.join(chunk)})" for chunk in chunks(ids, ID_CHUNK)]
 
 
 def from_bytea(value: str) -> bytes:
@@ -99,6 +115,7 @@ class PostgrestStore:
         self._token = ""
         self._token_expires = 0.0
         self._token_lock = threading.Lock()
+        self._keeps_photos = False
 
     # --- plumbing -------------------------------------------------------------
 
@@ -151,6 +168,17 @@ class PostgrestStore:
             return resp.json()
         except ValueError as exc:
             raise StoreError(502, f"postgrest sent a body that is not JSON: {resp.text[:300]}") from exc
+
+    def _require_keeping(self) -> None:
+        """Nothing is deleted until the table that keeps photos is served.
+
+        The schema bootstrap is best effort, so this app can find itself in
+        front of an older schema, where a delete would take the photos with it.
+        """
+        if self._keeps_photos:
+            return
+        self._call("GET", KEPT_PHOTOS, {"select": "id", "limit": "1"})
+        self._keeps_photos = True
 
     # --- lifecycle ------------------------------------------------------------
 
@@ -237,7 +265,8 @@ class PostgrestStore:
         return box
 
     def delete_box(self, tag_id: int) -> bool:
-        # items and photos go with it through ON DELETE CASCADE
+        # items and photos go with it through ON DELETE CASCADE, and the trigger keeps each photo
+        self._require_keeping()
         rows = self._call(
             "DELETE", "boxes", {"tag_id": f"eq.{tag_id}", "select": "id"}, prefer="return=representation"
         )
@@ -285,7 +314,8 @@ class PostgrestStore:
         clean_id = clean_uuid(item_id)
         if clean_id is None:
             return False
-        # its photos go with it through ON DELETE CASCADE
+        # its photos go with it through ON DELETE CASCADE, and the trigger keeps each one
+        self._require_keeping()
         rows = self._call(
             "DELETE", "items", {"id": f"eq.{clean_id}", "select": "id"}, prefer="return=representation"
         )
@@ -328,15 +358,51 @@ class PostgrestStore:
         if clean_id is None:
             return None
         column = "thumb" if thumb else "data"
-        rows = self._call("GET", "photos", {"select": column, "id": f"eq.{clean_id}"})
-        return from_bytea(rows[0][column]) if rows else None
+        # a kept photo is served from the same address as before
+        for table in ("photos", KEPT_PHOTOS):
+            rows = self._call("GET", table, {"select": column, "id": f"eq.{clean_id}"})
+            if rows:
+                return from_bytea(rows[0][column])
+        return None
 
     def delete_photo(self, photo_id: str) -> bool:
         clean_id = clean_uuid(photo_id)
         if clean_id is None:
             return False
+        # the trigger keeps it
+        self._require_keeping()
         rows = self._call(
             "DELETE", "photos", {"id": f"eq.{clean_id}", "select": "id"}, prefer="return=representation"
+        )
+        return bool(rows)
+
+    def get_kept_photo(self, photo_id: str) -> dict | None:
+        clean_id = clean_uuid(photo_id)
+        if clean_id is None:
+            return None
+        rows = self._call("GET", KEPT_PHOTOS, {**KEPT_PHOTO_SELECT, "id": f"eq.{clean_id}"})
+        return _shape_kept_photo(rows[0]) if rows else None
+
+    def list_photos_by_ids(self, photo_ids: list[str]) -> list[dict]:
+        wanted = clean_uuids(photo_ids)
+        found: list[dict] = []
+        for table in ("photos", KEPT_PHOTOS):
+            # one request per table, more only when the ids do not fit in one address
+            for id_filter in id_filters(wanted):
+                rows = self._call("GET", table, {**PHOTO_SELECT, "id": id_filter})
+                found.extend({**_shape_photo(row), "kept": table == KEPT_PHOTOS} for row in rows)
+            # what is still on a box or item is not asked for again
+            here = {photo["id"] for photo in found}
+            wanted = [photo_id for photo_id in wanted if photo_id not in here]
+        return found
+
+    def erase_photo(self, photo_id: str) -> bool:
+        clean_id = clean_uuid(photo_id)
+        if clean_id is None:
+            return False
+        # the one place image bytes are deleted, and only ever those of a kept photo
+        rows = self._call(
+            "DELETE", KEPT_PHOTOS, {"id": f"eq.{clean_id}", "select": "id"}, prefer="return=representation"
         )
         return bool(rows)
 

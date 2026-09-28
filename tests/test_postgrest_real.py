@@ -3,7 +3,11 @@
 Exercises the PostgREST store end to end: minted JWT -> role -> schema
 profile -> tables. It only ever touches negative tag ids, which the API
 refuses, so it cannot collide with a printed tag. Cleanup is a filtered
-delete of exactly those tag ids, and their items and photos go with them.
+delete of exactly those tag ids, and their items go with them.
+
+Their photos are kept, as every photo is, so cleanup then erases them: it
+lists the kept photos of those tag ids and of the boxes it just deleted, and
+erases each one by its id. No test image stays in the database.
 
 History is kept for good, so the entries these tests write stay behind.
 They carry the same negative tag ids, which the API never returns. Every
@@ -19,6 +23,7 @@ import pytest
 from PIL import Image
 
 from app import bootstrap, history, photos
+from app.stores import postgrest
 from app.stores.base import StoreError
 from app.stores.postgrest import PostgrestStore
 
@@ -30,15 +35,34 @@ TEST_TAGS = (TAG_A, TAG_B, TAG_C)
 BOX_KEYS = {"id", "tag_id", "name", "location", "notes", "created_at", "updated_at", "updated_by", "items", "photos"}
 ITEM_KEYS = {"id", "box_id", "name", "qty", "created_at", "updated_at", "photos"}
 PHOTO_KEYS = {"id", "box_id", "item_id", "width", "height", "size", "created_at", "created_by"}
+KEPT_PHOTO_KEYS = PHOTO_KEYS | {"tag_id", "removed_at"}
 HISTORY_KEYS = {"id", "at", "actor", "action", "tag_id", "box_id", "box_name", "item_id", "item_name", "changes"}
 
 # PostgREST reloads its schema cache a moment after a new table is created.
 RELOAD_SECONDS = 20
 
 
+def _kept_test_photos(store: PostgrestStore, box_ids: list[str]) -> list[str]:
+    """Ids of the kept photos that belong to the tests: by their tag, and by the boxes the tests made."""
+    filters = [{"tag_id": f"in.({','.join(str(tag_id) for tag_id in TEST_TAGS)})"}]
+    if box_ids:
+        filters.append({"box_id": f"in.({','.join(box_ids)})"})
+    found = []
+    for where in filters:
+        found += [row["id"] for row in store._call("GET", "kept_photos", {"select": "id", **where})]
+    return sorted(set(found))
+
+
 def _remove_test_boxes(store: PostgrestStore) -> None:
+    boxes = [store.get_box(tag_id) for tag_id in TEST_TAGS]
+    box_ids = [box["id"] for box in boxes if box is not None]
     for tag_id in TEST_TAGS:
         store.delete_box(tag_id)
+    # deleting a box keeps its photos, so the test images are erased here, one id at a time
+    for photo_id in _kept_test_photos(store, box_ids):
+        assert store.erase_photo(photo_id) is True, f"kept test photo {photo_id} could not be erased"
+    left = _kept_test_photos(store, box_ids)
+    assert left == [], f"kept test photos were left behind in the database: {left}"
 
 
 def _wait_until_served(store: PostgrestStore, table: str) -> None:
@@ -62,6 +86,20 @@ def _entries(store: PostgrestStore, box: dict) -> list[dict]:
     """History of one box, newest first. Entries left by earlier runs belong to other boxes."""
     listed = store.list_history(box["tag_id"], 200, None, include_tests=True)
     return [entry for entry in listed if entry["box_id"] == box["id"]]
+
+
+def _entries_with_photos(store: PostgrestStore, box: dict) -> list[dict]:
+    """The same, as the API hands them out: each entry with the photos it refers to."""
+    listed = history.list_entries(store, box["tag_id"], 200, None, include_tests=True)
+    return [entry for entry in listed if entry["box_id"] == box["id"]]
+
+
+def _kept(photo: dict) -> dict:
+    return {**photo, "kept": True}
+
+
+def _live(photo: dict) -> dict:
+    return {**photo, "kept": False}
 
 
 class Clock:
@@ -97,7 +135,7 @@ def live_store():
     store = PostgrestStore()
     reachable, detail = store.health()
     assert reachable, f"postgrest unreachable, red, not skipped: {detail}"
-    for table in ("history", "photos"):
+    for table in ("history", "photos", "kept_photos"):
         _wait_until_served(store, table)
     return store
 
@@ -254,6 +292,7 @@ def test_photo_round_trip(store):
 
     assert store.delete_photo(photo["id"]) is True
     assert store.delete_photo(photo["id"]) is False
+    # off the box, and get_photo only knows photos that are on one
     assert store.get_photo(photo["id"]) is None
     assert store.get_box(TAG_A)["photos"] == []
 
@@ -317,29 +356,198 @@ def test_missing_photos_are_none_not_errors(store):
     assert store.get_photo_data("not-a-uuid", thumb=True) is None
     assert store.delete_photo(str(uuid.uuid4())) is False
     assert store.delete_photo("not-a-uuid") is False
+    assert store.get_kept_photo(str(uuid.uuid4())) is None
+    assert store.get_kept_photo("not-a-uuid") is None
+    assert store.erase_photo(str(uuid.uuid4())) is False
+    assert store.erase_photo("not-a-uuid") is False
+    assert store.list_photos_by_ids([str(uuid.uuid4()), "not-a-uuid"]) == []
 
 
-def test_photos_go_with_their_box(store):
-    item = store.add_item(TAG_A, "Goes with the box", 1, "")
+# --- kept photos --------------------------------------------------------------
+
+
+def test_a_photo_carries_the_tag_of_its_box(store):
+    item = store.add_item(TAG_A, "Tagged", 1, "")
     on_box = store.add_photo(item["box_id"], None, _image(), "")
     on_item = store.add_photo(item["box_id"], item["id"], _image(), "")
+
+    rows = store._call("GET", "photos", {"select": "id,tag_id", "box_id": f"eq.{item['box_id']}"})
+
+    assert {row["id"]: row["tag_id"] for row in rows} == {on_box["id"]: TAG_A, on_item["id"]: TAG_A}, (
+        "the trigger photos_fill_tag_id did not put the tag of the box on its photos"
+    )
+    # and it stays out of the photo shape
+    assert set(store.get_photo(on_box["id"])) == PHOTO_KEYS
+
+
+def test_a_removed_photo_is_kept(store):
+    box = store.upsert_box(TAG_A, {"name": "Kept"}, "")
+    image = _image((640, 480))
+    photo = store.add_photo(box["id"], None, image, "bob")
+
+    assert store.delete_photo(photo["id"]) is True
+
+    kept = store.get_kept_photo(photo["id"])
+    assert kept is not None, "the photo was deleted and not kept: the trigger photos_keep did not run"
+    assert set(kept) == KEPT_PHOTO_KEYS
+    assert {key: kept[key] for key in PHOTO_KEYS} == photo
+    assert kept["tag_id"] == TAG_A
+    assert kept["removed_at"].endswith("+00:00")
+    apart = datetime.fromisoformat(kept["removed_at"]) - datetime.now(timezone.utc)
+    assert abs(apart) < timedelta(minutes=10), "removed_at is not now: do the database and this machine agree on it?"
+    assert store.get_photo_data(photo["id"]) == image["data"]
+    assert store.get_photo_data(photo["id"], thumb=True) == image["thumb"]
+    assert Image.open(io.BytesIO(store.get_photo_data(photo["id"]))).size == (640, 480)
+    assert store.get_box(TAG_A)["photos"] == []
+
+
+def test_photos_are_kept_when_their_box_is_deleted(store):
+    item = store.add_item(TAG_A, "Goes with the box", 1, "")
+    images = {"box": _image((640, 480)), "item": _image((200, 400))}
+    on_box = store.add_photo(item["box_id"], None, images["box"], "")
+    on_item = store.add_photo(item["box_id"], item["id"], images["item"], "")
+    elsewhere = store.add_photo(store.upsert_box(TAG_B, {}, "")["id"], None, _image(), "")
 
     assert store.delete_box(TAG_A) is True
 
-    assert store.get_photo(on_box["id"]) is None
-    assert store.get_photo(on_item["id"]) is None
-    assert store.get_photo_data(on_item["id"]) is None
+    # the photo of the item went through two cascades, box to item to photo, and is kept all the same
+    for photo, image in ((on_box, images["box"]), (on_item, images["item"])):
+        assert store.get_photo(photo["id"]) is None
+        kept = store.get_kept_photo(photo["id"])
+        assert kept is not None, f"photo {photo['id']} went with its box and was not kept"
+        assert {key: kept[key] for key in PHOTO_KEYS} == photo
+        assert kept["tag_id"] == TAG_A, "a photo deleted through the cascade must still know its tag"
+        assert store.get_photo_data(photo["id"]) == image["data"]
+        assert store.get_photo_data(photo["id"], thumb=True) == image["thumb"]
+    assert store.get_kept_photo(elsewhere["id"]) is None
+    assert store.get_box(TAG_B)["photos"] == [elsewhere]
+    # a new box on the same tag starts without them
+    assert store.upsert_box(TAG_A, {}, "")["photos"] == []
+    ours = {listed["tag_id"]: listed for listed in store.list_boxes() if listed["tag_id"] in TEST_TAGS}
+    assert [ours[tag_id]["photos"] for tag_id in (TAG_A, TAG_B)] == [[], [elsewhere]]
 
 
-def test_photos_go_with_their_item(store):
+def test_photos_are_kept_when_their_item_is_deleted(store):
     item = store.add_item(TAG_A, "Goes", 1, "")
+    image = _image((640, 480))
     on_box = store.add_photo(item["box_id"], None, _image(), "")
-    on_item = store.add_photo(item["box_id"], item["id"], _image(), "")
+    on_item = store.add_photo(item["box_id"], item["id"], image, "")
 
     assert store.delete_item(item["id"]) is True
 
     assert store.get_photo(on_item["id"]) is None
-    assert store.get_box(TAG_A)["photos"] == [on_box]
+    kept = store.get_kept_photo(on_item["id"])
+    assert kept is not None, "the photo went with its item and was not kept"
+    assert (kept["box_id"], kept["item_id"], kept["tag_id"]) == (item["box_id"], item["id"], TAG_A)
+    assert store.get_photo_data(on_item["id"]) == image["data"]
+    assert store.get_photo_data(on_item["id"], thumb=True) == image["thumb"]
+    assert store.get_kept_photo(on_box["id"]) is None
+    box = store.get_box(TAG_A)
+    assert box["photos"] == [on_box]
+    assert box["items"] == []
+
+
+def test_list_photos_by_ids_says_which_are_kept(store):
+    item = store.add_item(TAG_A, "Listed", 1, "")
+    live = store.add_photo(item["box_id"], None, _image(), "")
+    removed = store.add_photo(item["box_id"], None, _image(), "")
+    with_item = store.add_photo(item["box_id"], item["id"], _image(), "")
+    not_asked_for = store.add_photo(item["box_id"], None, _image(), "")
+    store.delete_photo(removed["id"])
+    store.delete_item(item["id"])
+
+    asked = [with_item["id"], live["id"], str(uuid.uuid4()), "not-a-uuid", removed["id"], live["id"]]
+    found = store.list_photos_by_ids(asked)
+
+    assert sorted(found, key=lambda photo: photo["created_at"]) == [_live(live), _kept(removed), _kept(with_item)]
+    # what a photo is, never the image itself
+    assert all(set(photo) == PHOTO_KEYS | {"kept"} for photo in found)
+    assert not_asked_for["id"] not in {photo["id"] for photo in found}
+    assert store.list_photos_by_ids([]) == []
+
+
+def test_list_photos_by_ids_takes_more_ids_than_one_address_holds(store):
+    box = store.upsert_box(TAG_A, {}, "")
+    live = store.add_photo(box["id"], None, _image(), "")
+    kept = store.add_photo(box["id"], None, _image(), "")
+    store.delete_photo(kept["id"])
+    unknown = [str(uuid.uuid4()) for _ in range(3 * postgrest.ID_CHUNK)]
+    half = len(unknown) // 2
+
+    found = store.list_photos_by_ids(unknown[:half] + [kept["id"]] + unknown[half:] + [live["id"]])
+
+    assert found == [_live(live), _kept(kept)], "a long list of ids must be asked for in several requests"
+
+
+def test_erase_a_kept_photo(store):
+    box = store.upsert_box(TAG_A, {}, "")
+    image = _image()
+    stays = store.add_photo(box["id"], None, image, "")
+    goes = store.add_photo(box["id"], None, _image(), "")
+    store.delete_photo(stays["id"])
+    store.delete_photo(goes["id"])
+
+    assert store.erase_photo(goes["id"]) is True
+    assert store.erase_photo(goes["id"]) is False
+
+    assert store.get_kept_photo(goes["id"]) is None
+    assert store.get_photo_data(goes["id"]) is None
+    assert store.get_photo_data(goes["id"], thumb=True) is None
+    assert store.list_photos_by_ids([goes["id"], stays["id"]]) == [_kept(stays)]
+    assert store.get_photo_data(stays["id"]) == image["data"]
+
+
+def test_erase_never_touches_a_photo_that_is_on_a_box(store):
+    box = store.upsert_box(TAG_A, {}, "")
+    image = _image()
+    photo = store.add_photo(box["id"], None, image, "")
+
+    assert store.erase_photo(photo["id"]) is False
+
+    assert store.get_photo(photo["id"]) == photo
+    assert store.get_photo_data(photo["id"]) == image["data"]
+    assert store.get_box(TAG_A)["photos"] == [photo]
+
+
+def test_a_kept_photo_cannot_be_changed(store):
+    box = store.upsert_box(TAG_A, {}, "")
+    photo = store.add_photo(box["id"], None, _image(), "bob")
+    store.delete_photo(photo["id"])
+
+    with pytest.raises(StoreError) as refused:
+        store._call("PATCH", "kept_photos", {"id": f"eq.{photo['id']}"}, {"created_by": "someone else"})
+
+    assert refused.value.status_code in (401, 403), f"expected a refusal for lack of UPDATE: {refused.value.detail}"
+    assert store.get_kept_photo(photo["id"])["created_by"] == "bob"
+
+
+def test_nothing_is_deleted_until_the_table_that_keeps_photos_is_served(store, monkeypatch):
+    item = store.add_item(TAG_A, "Stays", 1, "")
+    on_box = store.add_photo(item["box_id"], None, _image(), "")
+    on_item = store.add_photo(item["box_id"], item["id"], _image(), "")
+    unsure = PostgrestStore()
+
+    # as it would be in front of a schema from before photos were kept
+    with monkeypatch.context() as patch:
+        patch.setattr(postgrest, "KEPT_PHOTOS", "kept_photos_that_is_not_there")
+        for delete, target in (
+            (unsure.delete_photo, on_box["id"]),
+            (unsure.delete_item, item["id"]),
+            (unsure.delete_box, TAG_A),
+        ):
+            with pytest.raises(StoreError):
+                delete(target)
+        assert unsure._keeps_photos is False
+
+    box = store.get_box(TAG_A)
+    assert box is not None, "the box was deleted although the store could not tell that photos are kept"
+    assert box["photos"] == [on_box]
+    assert [entry["photos"] for entry in box["items"]] == [[on_item]]
+
+    # in front of the schema as it is, the same store deletes, and the photo is kept
+    assert unsure.delete_photo(on_box["id"]) is True
+    assert unsure._keeps_photos is True
+    assert store.get_kept_photo(on_box["id"]) is not None
 
 
 # --- history ------------------------------------------------------------------
@@ -396,7 +604,7 @@ def test_history_records_every_kind_of_write(store, clock):
             None,
             {"name": ["Every kind", None], "notes": ["changed", None], "items": [[{"name": "Gadget", "qty": 2}], None]},
         ),
-        ("item_removed", item["id"], {"name": ["Widget", None], "qty": [4, None], "photos": [1, None]}),
+        ("item_removed", item["id"], {"name": ["Widget", None], "qty": [4, None], "photos": [[on_item["id"]], None]}),
         ("item_added", other["id"], {"name": [None, "Gadget"], "qty": [None, 2]}),
         ("box_updated", None, {"notes": ["", "changed"]}),
         ("photo_removed", None, {"photo": [on_box["id"], None]}),
@@ -461,3 +669,102 @@ def test_history_pages_with_before(store, clock):
     assert first == everything[:2]
     assert second == everything[2:4]
     assert all(entry["at"] < first[-1]["at"] for entry in second)
+
+
+# --- history and kept photos --------------------------------------------------
+
+
+def test_entries_carry_their_photos_and_say_which_are_kept(store, clock):
+    box = history.put_box(store, TAG_A, {"name": "Entries"}, "tester")
+    stays = history.add_photo(store, box["id"], None, _image(), "tester")
+    goes = history.add_photo(store, box["id"], None, _image(), "tester")
+    history.delete_photo(store, goes["id"], "tester")
+
+    entries = _entries_with_photos(store, box)
+
+    assert all(set(entry) == HISTORY_KEYS | {"photos"} for entry in entries)
+    assert [(entry["action"], entry["photos"]) for entry in entries] == [
+        ("photo_removed", [_kept(goes)]),
+        ("photo_added", [_kept(goes)]),
+        ("photo_added", [_live(stays)]),
+        ("box_created", []),
+    ]
+
+
+def test_deleting_lists_the_photos_that_went_and_they_are_kept(store, clock):
+    box = history.put_box(store, TAG_B, {"name": "Deleted with photos"}, "tester")
+    widget = history.add_item(store, TAG_B, "Widget", 1, "tester")
+    gadget = history.add_item(store, TAG_B, "Gadget", 1, "tester")
+    on_box = [history.add_photo(store, box["id"], None, _image(), "tester") for _ in range(2)]
+    on_widget = history.add_photo(store, box["id"], widget["id"], _image(), "tester")
+    on_gadget = history.add_photo(store, box["id"], gadget["id"], _image(), "tester")
+
+    assert history.delete_item(store, gadget["id"], "tester") is True
+    assert history.delete_box(store, TAG_B, "tester") is True
+
+    deleted, removed = _entries_with_photos(store, box)[:2]
+    assert removed["action"] == "item_removed"
+    assert removed["changes"]["photos"] == [[on_gadget["id"]], None]
+    assert removed["photos"] == [_kept(on_gadget)]
+    assert deleted["action"] == "box_deleted"
+    # its own photos first, then those of its items
+    assert deleted["changes"]["photos"] == [[on_box[0]["id"], on_box[1]["id"], on_widget["id"]], None]
+    assert deleted["photos"] == [_kept(on_box[0]), _kept(on_box[1]), _kept(on_widget)]
+
+
+def test_an_entry_that_holds_a_count_refers_to_no_photos(store, clock):
+    box = history.put_box(store, TAG_C, {"name": "Counted"}, "tester")
+    history.add_photo(store, box["id"], None, _image(), "tester")
+    # as it was written before photos were kept: how many went, and not which
+    old = {
+        "id": str(uuid.uuid4()),
+        "at": clock(),
+        "actor": "tester",
+        "action": "item_removed",
+        "tag_id": TAG_C,
+        "box_id": box["id"],
+        "box_name": "Counted",
+        "item_id": str(uuid.uuid4()),
+        "item_name": "Widget",
+        "changes": {"name": ["Widget", None], "qty": [1, None], "photos": [2, None]},
+    }
+    store.add_history(old)
+
+    newest = _entries_with_photos(store, box)[0]
+
+    assert newest == {**old, "photos": []}
+
+
+def test_erasing_is_recorded_and_the_photo_is_gone_from_every_entry(store, clock):
+    box = history.put_box(store, TAG_A, {"name": "Erased from"}, "tester")
+    item = history.add_item(store, TAG_A, "Widget", 1, "tester")
+    on_box = history.add_photo(store, box["id"], None, _image(), "tester")
+    on_item = history.add_photo(store, box["id"], item["id"], _image(), "tester")
+    history.update_item(store, item["id"], {"name": "Widget, large"}, "tester")
+    history.delete_box(store, TAG_A, "tester")
+
+    assert history.erase_photo(store, on_item["id"], "eraser") is True
+    assert history.erase_photo(store, on_item["id"], "eraser") is False
+
+    assert store.get_photo_data(on_item["id"]) is None
+    assert store.get_kept_photo(on_item["id"]) is None
+    erased, deleted, *earlier = _entries_with_photos(store, box)
+    assert erased == {
+        "id": erased["id"],
+        "at": erased["at"],
+        "actor": "eraser",
+        "action": "photo_erased",
+        "tag_id": TAG_A,
+        "box_id": box["id"],
+        # the names they had when they were last heard of
+        "box_name": "Erased from",
+        "item_id": item["id"],
+        "item_name": "Widget, large",
+        "changes": {"photo": [on_item["id"], None]},
+        "photos": [],
+    }
+    assert deleted["action"] == "box_deleted"
+    assert deleted["changes"]["photos"] == [[on_box["id"], on_item["id"]], None]
+    assert deleted["photos"] == [_kept(on_box)]
+    assert [photo["id"] for entry in earlier for photo in entry["photos"]] == [on_box["id"]]
+    assert store.get_photo_data(on_box["id"]) is not None
