@@ -1,7 +1,9 @@
 """Manual wrapper over the same schema setup the configured store runs at startup.
 
 With no flag it only applies the schema. --samples is the one deliberate way
-to get the sample boxes back once a database has been initialised.
+to get the sample boxes back once a database has been initialised. The app
+applies the schema itself at startup, so running this by hand for the schema
+is not the intended use.
 """
 
 import argparse

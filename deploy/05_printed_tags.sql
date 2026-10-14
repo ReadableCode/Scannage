@@ -1,5 +1,7 @@
 -- Printed labels. Idempotent and additive only; applied by app/bootstrap.py
 -- at startup after 04_kept_photos.sql (schema version 4).
+-- Running this file by hand with psql might work, but it is not the intended
+-- use: change it here and let the app apply it.
 
 -- One row per tag that has had a label printed. tag_id is a plain column
 -- with no foreign key: a label is printed before any box exists, and stays

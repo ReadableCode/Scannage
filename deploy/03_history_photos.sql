@@ -1,5 +1,7 @@
 -- History and photos. Idempotent and additive only; applied by
 -- app/bootstrap.py at startup after 02_schema.sql (schema version 2).
+-- Running this file by hand with psql might work, but it is not the intended
+-- use: change it here and let the app apply it.
 
 -- One row per change, kept for good. tag_id, box_id and item_id are plain
 -- columns with no foreign keys, so an entry outlives the box it describes.

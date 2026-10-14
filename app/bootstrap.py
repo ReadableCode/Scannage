@@ -89,7 +89,8 @@ def apply_schema(force: bool = False) -> bool:
                 if cur.fetchone() is None:
                     raise RuntimeError(
                         f"cluster role {role!r} missing: the PostgREST roles "
-                        "postgrest_authenticator and web_anon must exist before this app starts"
+                        "postgrest_authenticator and web_anon must exist before this app starts; they are created by "
+                        "the postgres-cluster-roles service in the Docker repo (Docker/postgres/cluster_roles.sql)"
                     )
             cur.execute(ROLE_SQL)
             for name in SCHEMA_FILES:

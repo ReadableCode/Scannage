@@ -1,5 +1,7 @@
 -- Kept photos. Idempotent and additive only; applied by app/bootstrap.py at
 -- startup after 03_history_photos.sql (schema version 3).
+-- Running this file by hand with psql might work, but it is not the intended
+-- use: change it here and let the app apply it.
 
 -- The tag a photo is on rides on the photo itself. When a box is deleted its
 -- photos go through ON DELETE CASCADE, and by then the box row is gone, so

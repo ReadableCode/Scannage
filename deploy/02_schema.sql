@@ -1,6 +1,8 @@
 -- Core schema. Idempotent and additive only; applied by app/bootstrap.py at
 -- startup (version-gated via scannage.deploy_meta). The scannage_user role is
 -- created by the bootstrap before this file runs.
+-- Running this file by hand with psql might work, but it is not the intended
+-- use: change it here and let the app apply it.
 
 CREATE SCHEMA IF NOT EXISTS scannage;
 
