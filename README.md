@@ -154,7 +154,9 @@ At startup the app creates its schema, tables and the `scannage_user` role if
 they are missing. It only ever adds, so a database from an earlier version is
 brought up to date in place with its data untouched. The schema also has to
 be listed in PostgREST's `db-schemas` setting, and the roles
-`postgrest_authenticator` and `web_anon` must already exist.
+`postgrest_authenticator` and `web_anon` must already exist. On elitedesk the
+`postgres-cluster-roles` service in the Docker repo creates them on every
+deploy (`Docker/postgres/cluster_roles.sql`).
 
 The choice of store is explicit. If `postgrest` is selected and cannot be
 reached, the app reports it and does not switch to SQLite.
