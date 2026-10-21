@@ -10,6 +10,28 @@ phone at the shelf, and the browser shows what is inside every box it can see.
 - Everything third party is open source and vendored in this repo. Nothing is
   loaded from a CDN and no video leaves the phone.
 
+It is a small Python (FastAPI) server with a plain HTML, CSS and JavaScript
+frontend. The pages are:
+
+- **scan**: the live camera view, with box names and contents drawn over each
+  tag it sees, and a search that lights up the boxes holding a match
+- **boxes**: every box, and a new box on the next free tag
+- **editor**: a box's name, where it lives, notes, items with quantities, and
+  photos. A box's QR code opens it at `/b/<tag>`
+- **history**: every change, kept for good
+- **labels**: printable tag sheets, tracking which tags have been printed
+
+The inventory lives in a SQLite file by default, or in Postgres through
+PostgREST.
+
+| Live view (`/?demo`) | Boxes | Editor |
+|---|---|---|
+| ![Live view over the simulated shelf](docs/screenshots/live.png) | ![Boxes list](docs/screenshots/boxes.png) | ![Box editor](docs/screenshots/editor.png) |
+
+![A printed label sheet](docs/screenshots/labels.png)
+
+The screenshots use the sample boxes a new database comes with.
+
 ## How it works
 
 Each label carries two codes:
